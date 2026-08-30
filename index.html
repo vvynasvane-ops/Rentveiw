@@ -4,11 +4,12 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>RentReview</title>
-<link rel="icon" type="image/x-icon" href="notebook-pen.ico">
+  <link rel="icon" type="image/x-icon" href="notebook-pen.ico">
 <link rel="icon" type="image/svg+xml" href="notebook-pen.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="notebook-pen-192.png">
 <link rel="icon" type="image/png" sizes="512x512" href="notebook-pen-512.png">
 <link rel="apple-touch-icon" sizes="180x180" href="notebook-pen-apple-touch.png">
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
 <script type="module">
@@ -399,8 +400,23 @@
     if(openList.length===0){ cl.innerHTML='<li class="empty-item">No open issues</li>'; }
     else { cl.innerHTML=openList.map(c=>{ const room=rooms.find(r=>r.id===c.roomId); return `<li class="pending-item"><span class="pi-room">${room?room.name:'—'} <span class="pi-month tag-${c.type}">${c.type}</span></span><span class="comp-subject">${c.subject||''}</span><span class="status-badge status-${c.status}">${c.status}</span></li>`; }).join(''); }
   }
+  // Marking a bill PAID is the trigger point that locks its final readings
+  // in as the next bill's starting point for that room — this is what
+  // keeps the reading chain trustworthy: a bill isn't "official" until
+  // it's paid, so drafts/unpaid corrections can never poison the baseline.
+  async function markBillPaidAndCarryForward(billId) {
+    const b = bills.find(x=>x.id===billId);
+    await updDoc('bills', billId, { paid:true });
+    if (b) {
+      await updDoc('rooms', b.roomId, {
+        lastWaterReading: b.waterFinal,
+        lastPowerReading: b.powerFinal,
+        lastBillMonth: b.month
+      });
+    }
+  }
   window.markPaid = async function(billId) {
-    try { await updDoc('bills',billId,{paid:true}); showToast('Marked as paid'); }
+    try { await markBillPaidAndCarryForward(billId); showToast('Marked as paid — reading baseline carried forward'); }
     catch(e){ showToast(e.message,'error'); }
   };
 
@@ -456,7 +472,7 @@
       <div class="stat-grid">
         <div class="stat-card"><div class="stat-label">Monthly Rent</div><div class="stat-value accent" style="font-size:16px">KES ${(r.rent||0).toLocaleString()}</div></div>
         <div class="stat-card"><div class="stat-label">Water / Power Rate</div><div class="stat-value" style="font-size:16px">${r.waterRate||0} / ${r.powerRate||0}</div></div>
-        <div class="stat-card"><div class="stat-label">Baseline Readings</div><div class="stat-value" style="font-size:16px">💧${r.lastWaterReading ?? r.initWater ?? 0} ⚡${r.lastPowerReading ?? r.initPower ?? 0}</div></div>
+        <div class="stat-card"><div class="stat-label">Baseline (last paid bill)</div><div class="stat-value" style="font-size:16px">💧${r.lastWaterReading ?? r.initWater ?? 0} ⚡${r.lastPowerReading ?? r.initPower ?? 0}</div></div>
         <div class="stat-card"><div class="stat-label">PDF Slips</div><div class="stat-value dim">${pdfCount}</div></div>
       </div>
 
@@ -590,7 +606,7 @@
     document.getElementById('bf-waterInit').readOnly = true;
     document.getElementById('bf-powerInit').readOnly = true;
     document.getElementById('bf-baseline-note').textContent = hasBaseline
-      ? '🔒 Carried forward from the last finalized bill for consistency. To change it, edit the room and check "Meter replaced".'
+      ? '🔒 Carried forward from the last PAID bill for consistency. To change it, edit the room and check "Meter replaced".'
       : 'ℹ First bill for this room — using its Initial Reading.';
     setVal('bf-waterFinal',''); setVal('bf-powerFinal','');
     calculateBill();
@@ -617,14 +633,20 @@
     const data={roomId,month,rent,waterInit:wI,waterFinal:wF,waterUsed:wUsed,waterRate:wR,waterCost:wCost,powerInit:pI,powerFinal:pF,powerUsed:pUsed,powerRate:pR,powerCost:pCost,total:rent+wCost+pCost,paid:false,createdAt:new Date().toISOString()};
     try{
       await addDoc2('bills',data);
-      // Finalize the reading consistency chain: this bill's Final Reading
-      // becomes next month's locked Initial Reading for this room.
-      await updDoc('rooms',roomId,{lastWaterReading:wF, lastPowerReading:pF, lastBillMonth:month});
+      // The reading baseline does NOT move yet — it only carries forward
+      // once this bill is marked Paid (see markBillPaidAndCarryForward),
+      // so an unpaid or since-corrected bill can never poison next month's
+      // starting reading.
       showToast('Bill saved'); closeModal('modal-billing');
     }
     catch(e){ showToast(e.message,'error'); }
   };
-  window.togglePaid = async function(id,current){ try{ await updDoc('bills',id,{paid:!current}); showToast(!current?'Marked paid':'Marked unpaid'); }catch(e){ showToast(e.message,'error'); } };
+  window.togglePaid = async function(id,current){
+    try{
+      if (!current) { await markBillPaidAndCarryForward(id); showToast('Marked paid — reading baseline carried forward'); }
+      else { await updDoc('bills',id,{paid:false}); showToast('Marked unpaid'); }
+    }catch(e){ showToast(e.message,'error'); }
+  };
   window.deleteBill = async function(id){ if(!confirm('Delete this bill?')) return; try{ await delDoc('bills',id); showToast('Deleted'); }catch(e){ showToast(e.message,'error'); } };
 
   // ── OFFICIAL PDF PAYMENT SLIP ────────────────────────────────────────────
