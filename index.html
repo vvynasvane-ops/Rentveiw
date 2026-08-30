@@ -1,0 +1,1936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>RentReview</title>
+<link rel="icon" type="image/x-icon" href="notebook-pen.ico">
+<link rel="icon" type="image/svg+xml" href="notebook-pen.svg">
+<link rel="icon" type="image/png" sizes="192x192" href="notebook-pen-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="notebook-pen-512.png">
+<link rel="apple-touch-icon" sizes="180x180" href="notebook-pen-apple-touch.png">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getFirestore, collection, getDocs, addDoc, setDoc, deleteDoc, updateDoc,
+    doc, getDoc, query, orderBy, onSnapshot, serverTimestamp
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+  import {
+    getAuth, onAuthStateChanged, createUserWithEmailAndPassword,
+    signInWithEmailAndPassword, signOut, updateProfile,
+    GoogleAuthProvider, signInWithPopup, sendPasswordResetEmail
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+  // ── PASTE YOUR FIREBASE CONFIG HERE ─────────────────────────────────────
+   const firebaseConfig = {
+    apiKey: "AIzaSyAF2NwamtnNunM9cukvIeaXqh4s8RU7FNc",
+    authDomain: "rentreview-626c8.firebaseapp.com",
+    projectId: "rentreview-626c8",
+    storageBucket: "rentreview-626c8.firebasestorage.app",
+    messagingSenderId: "767959705569",
+    appId: "1:767959705569:web:db655e309782db2d1454a0",
+    measurementId: "G-ST7663QX44"
+  };
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const app  = initializeApp(firebaseConfig);
+  const db   = getFirestore(app);
+  const auth = getAuth(app);
+  const googleProvider = new GoogleAuthProvider();
+
+  // ── Per-account scoping ──────────────────────────────────────────────────
+  // Every landlord gets their own isolated ledger: all data lives under
+  // /users/{uid}/<collection>/<docId>. Nobody can see or touch another
+  // account's rooms, tenants, bills, readings or complaints.
+  let currentUser     = null;   // firebase auth user object
+  let buildingName    = '';     // this account's building name
+  let countryCode     = '254';  // default dialing code used to auto-format tenant phone numbers (Kenya)
+  let liveUnsub       = [];     // active onSnapshot unsubscribe fns
+
+  function uidPath() {
+    if (!currentUser) throw new Error('Not signed in');
+    return ['users', currentUser.uid];
+  }
+
+  // ── Firestore helpers (scoped to the signed-in user) ─────────────────────
+  async function getCol(col, ...qArgs) {
+    const base = collection(db, ...uidPath(), col);
+    const q = qArgs.length ? query(base, ...qArgs) : base;
+    const snap = await getDocs(q);
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  }
+  async function addDoc2(col, data)     { return await addDoc(collection(db, ...uidPath(), col), data); }
+  async function setDoc2(col, id, data) { return await setDoc(doc(db, ...uidPath(), col, id), data); }
+  async function delDoc(col, id)        { return await deleteDoc(doc(db, ...uidPath(), col, id)); }
+  async function updDoc(col, id, data)  { return await updateDoc(doc(db, ...uidPath(), col, id), data); }
+
+  // Live (auto-updating) subscription — keeps `target` array in sync with
+  // Firestore in real time and re-renders whenever anything changes.
+  function watchCol(col, sortKey, onChange) {
+    const base = collection(db, ...uidPath(), col);
+    const unsub = onSnapshot(base, snap => {
+      const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      if (sortKey) list.sort((a,b) => (''+(a[sortKey]||'')).localeCompare(''+(b[sortKey]||'')));
+      onChange(list);
+    }, err => console.error('watchCol', col, err));
+    liveUnsub.push(unsub);
+    return unsub;
+  }
+  function stopAllWatches() { liveUnsub.forEach(u=>{ try{u();}catch(e){} }); liveUnsub = []; }
+
+  // ── Phone number recognition ─────────────────────────────────────────────
+  // The only input we require from the tenant record is a phone number in
+  // whatever format the landlord typed it (local "07xx…", "+254 7xx…",
+  // "254 7xx…", with spaces/dashes/brackets). This turns that into a clean
+  // international MSISDN (digits only, country code, no leading 0/+),
+  // using the account's default country code for local-format numbers.
+  function normalizePhone(raw) {
+    if (!raw) return null;
+    let d = String(raw).replace(/[^\d+]/g, '');   // strip everything but digits and +
+    if (d.startsWith('+')) d = d.slice(1);
+    if (d.startsWith('00')) d = d.slice(2);        // international dial-out prefix
+    if (d.startsWith('0')) d = countryCode + d.slice(1);   // local format -> country code
+    else if (!d.startsWith(countryCode) && d.length <= 10) d = countryCode + d; // bare local number, no leading 0
+    return /^\d{8,15}$/.test(d) ? d : null;
+  }
+
+  // ── AI Prefs (localStorage) ──────────────────────────────────────────────
+  const AI_DEFAULTS = {
+    apiKey:       "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",
+    model:        "llama-3.3-70b-versatile",
+    temperature:  0.7,
+    maxTokens:    1024,
+    systemPrompt: "You are Rent Review AI — an intelligent property management assistant embedded inside the Rent Review web app used by a Kenyan landlord. Your knowledge is strictly limited to the property data provided in each message. Do not invent tenants, rooms, bills, or any figures not present in the data. Be concise, direct, and practical. Use KES for currency. When answering, cite specific room names, tenant names, or months from the data. If the data does not contain enough information to answer, say so clearly."
+  };
+  const AVAILABLE_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama3-70b-8192",
+    "llama3-8b-8192",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it"
+  ];
+  const AiPrefs = {
+    get: (k)    => { try { return JSON.parse(localStorage.getItem('rr_ai_'+k)) ?? AI_DEFAULTS[k]; } catch(e){ return AI_DEFAULTS[k]; } },
+    set: (k, v) => { try { localStorage.setItem('rr_ai_'+k, JSON.stringify(v)); } catch(e){} },
+    reset: ()   => { Object.keys(AI_DEFAULTS).forEach(k => localStorage.removeItem('rr_ai_'+k)); }
+  };
+
+  // ── State ────────────────────────────────────────────────────────────────
+  let rooms = [], tenants = [], readings = [], bills = [], complaints = [];
+  let currentPage = 'dashboard';
+  let editTarget  = null;
+  let aiSnapshot  = null;          // cached property data for AI
+  let chatHistory = [];            // [{role,content}]
+
+  // ── Boot ─────────────────────────────────────────────────────────────────
+  window.addEventListener('DOMContentLoaded', () => {
+    if (publicSlipId) { renderPublicSlipPage(publicSlipId); return; }
+    document.getElementById('authEmailBtn').addEventListener('click', doEmailAuth);
+    document.getElementById('authGoogleBtn').addEventListener('click', doGoogleAuth);
+    document.getElementById('authPass').addEventListener('keydown', e => { if(e.key==='Enter') doEmailAuth(); });
+    document.getElementById('authSwitchLink').addEventListener('click', toggleAuthMode);
+    document.getElementById('authForgotLink').addEventListener('click', doForgotPassword);
+    document.querySelectorAll('[data-nav]').forEach(el => {
+      el.addEventListener('click', () => navigate(el.dataset.nav));
+    });
+    document.getElementById('logoutBtn').addEventListener('click', doLogout);
+    document.getElementById('onbBtn').addEventListener('click', saveOnboarding);
+
+    // AI chat input enter key
+    document.getElementById('aiInput').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAiMessage(); }
+    });
+
+    // AI Settings — populate model dropdown
+    const ms = document.getElementById('ais-model');
+    AVAILABLE_MODELS.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = opt.textContent = m;
+      ms.appendChild(opt);
+    });
+  });
+
+  // ── Auth ─────────────────────────────────────────────────────────────────
+  // Every landlord signs up with an email + password of their own choosing
+  // (or one tap via Google) and lands in a private ledger tied to their
+  // account — nobody else can read or write into it.
+  let authMode = 'signin'; // 'signin' | 'signup'
+
+  // A tenant opening a shared ?slip=<id> link never needs to sign in — it's
+  // a read-only public page, so we skip the whole auth flow for that visit.
+  const publicSlipId = new URLSearchParams(location.search).get('slip');
+
+  onAuthStateChanged(auth, async (user) => {
+    if (publicSlipId) return; // public slip page handles itself, see boot section
+    stopAllWatches();
+    if (user) {
+      currentUser = user;
+      await enterAccount(user);
+    } else {
+      currentUser = null;
+      showAuthScreen();
+    }
+  });
+
+  function toggleAuthMode(e) {
+    if (e) e.preventDefault();
+    authMode = authMode === 'signin' ? 'signup' : 'signin';
+    renderAuthMode();
+  }
+  function renderAuthMode() {
+    const isSignup = authMode === 'signup';
+    document.getElementById('authTitle').textContent = isSignup ? 'Create your account' : 'Welcome back';
+    document.getElementById('authSub').textContent = isSignup
+      ? 'Set up your own building ledger in seconds'
+      : 'Sign in to manage your building';
+    document.getElementById('authEmailBtn').textContent = isSignup ? 'Create Account' : 'Sign In';
+    document.getElementById('authSwitchLink').textContent = isSignup ? 'Already have an account? Sign in' : "New here? Create an account";
+    document.getElementById('authForgotLink').style.display = isSignup ? 'none' : 'block';
+    document.getElementById('authError').style.display = 'none';
+  }
+
+  async function doEmailAuth() {
+    const email = val('authEmail'), pass = document.getElementById('authPass').value;
+    const err = document.getElementById('authError');
+    err.style.display = 'none';
+    if (!email || !pass) { err.textContent = 'Enter both email and password.'; err.style.display='block'; return; }
+    if (pass.length < 6) { err.textContent = 'Password must be at least 6 characters.'; err.style.display='block'; return; }
+    const btn = document.getElementById('authEmailBtn'); btn.disabled = true;
+    try {
+      if (authMode === 'signup') await createUserWithEmailAndPassword(auth, email, pass);
+      else await signInWithEmailAndPassword(auth, email, pass);
+      document.getElementById('authPass').value = '';
+    } catch(e) {
+      err.textContent = friendlyAuthError(e);
+      err.style.display = 'block';
+    }
+    btn.disabled = false;
+  }
+
+  async function doGoogleAuth() {
+    const err = document.getElementById('authError');
+    err.style.display = 'none';
+    try { await signInWithPopup(auth, googleProvider); }
+    catch(e) { err.textContent = friendlyAuthError(e); err.style.display = 'block'; }
+  }
+
+  async function doForgotPassword(e) {
+    if (e) e.preventDefault();
+    const email = val('authEmail');
+    const err = document.getElementById('authError');
+    if (!email) { err.textContent = 'Enter your email above first, then click "Forgot password".'; err.style.display='block'; return; }
+    try { await sendPasswordResetEmail(auth, email); showToast('Password reset email sent'); }
+    catch(e2) { err.textContent = friendlyAuthError(e2); err.style.display = 'block'; }
+  }
+
+  function friendlyAuthError(e) {
+    const code = e?.code || '';
+    const map = {
+      'auth/email-already-in-use': 'That email already has an account — try signing in instead.',
+      'auth/invalid-email':        'That email address looks invalid.',
+      'auth/weak-password':        'Password is too weak — use at least 6 characters.',
+      'auth/user-not-found':       'No account found with that email.',
+      'auth/wrong-password':       'Incorrect password.',
+      'auth/invalid-credential':   'Incorrect email or password.',
+      'auth/too-many-requests':    'Too many attempts — please wait a moment and try again.',
+      'auth/popup-closed-by-user': 'Google sign-in was cancelled.',
+    };
+    return map[code] || (e.message || 'Something went wrong — please try again.');
+  }
+
+  function doLogout() { stopAllWatches(); signOut(auth); }
+
+  function showAuthScreen() {
+    document.getElementById('loginScreen').style.display='flex';
+    document.getElementById('appShell').style.display='none';
+    document.getElementById('onboardScreen').style.display='none';
+    renderAuthMode();
+  }
+
+  // After sign-in, load (or create) this account's building profile.
+  async function enterAccount(user) {
+    const ref = doc(db, 'users', user.uid);
+    const snap = await getDoc(ref);
+    if (!snap.exists() || !snap.data().buildingName) {
+      // First time in — ask for the building name before showing the app.
+      document.getElementById('loginScreen').style.display='none';
+      document.getElementById('appShell').style.display='none';
+      document.getElementById('onboardScreen').style.display='flex';
+      setVal('onbName', snap.exists() ? (snap.data().buildingName||'') : '');
+      setVal('onbCountryCode', snap.exists() ? (snap.data().countryCode||'254') : '254');
+      return;
+    }
+    buildingName = snap.data().buildingName;
+    countryCode  = snap.data().countryCode || '254';
+    showApp();
+  }
+
+  async function saveOnboarding() {
+    const name = val('onbName');
+    const cc = (val('onbCountryCode')||'254').replace(/\D/g,'') || '254';
+    if (!name) { showToast('Please enter a building name','error'); return; }
+    const btn = document.getElementById('onbBtn'); btn.disabled = true;
+    try {
+      await setDoc(doc(db, 'users', currentUser.uid), {
+        buildingName: name,
+        countryCode: cc,
+        email: currentUser.email || '',
+        createdAt: serverTimestamp()
+      }, { merge: true });
+      buildingName = name; countryCode = cc;
+      showApp();
+    } catch(e) { showToast(e.message,'error'); }
+    btn.disabled = false;
+  }
+
+  // Settings: lets the landlord fix the building name / country code later
+  // (e.g. if tenant numbers are being mis-formatted for SMS/WhatsApp).
+  window.openSettings = function() {
+    setVal('setName', buildingName); setVal('setCountryCode', countryCode);
+    openModal('modal-settings');
+  };
+  window.saveSettings = async function() {
+    const name = val('setName');
+    const cc = (val('setCountryCode')||'254').replace(/\D/g,'') || '254';
+    if (!name) { showToast('Building name required','error'); return; }
+    try {
+      await setDoc(doc(db,'users',currentUser.uid), { buildingName:name, countryCode:cc }, { merge:true });
+      buildingName = name; countryCode = cc;
+      document.querySelectorAll('.brand-name').forEach(el=>el.textContent = buildingName || 'RentReview');
+      showToast('Settings saved'); closeModal('modal-settings');
+    } catch(e) { showToast(e.message,'error'); }
+  };
+
+  function showApp() {
+    document.getElementById('loginScreen').style.display='none';
+    document.getElementById('onboardScreen').style.display='none';
+    document.getElementById('appShell').style.display='flex';
+    document.querySelectorAll('.brand-name').forEach(el=>el.textContent = buildingName || 'RentReview');
+    document.getElementById('topbar-account-email').textContent = currentUser.email || '';
+    startLiveSync();
+    navigate('dashboard');
+  }
+
+  // Real-time sync: rooms/tenants/readings/bills/complaints auto-update the
+  // moment anything changes, on this device or any other signed-in device.
+  function startLiveSync() {
+    watchCol('rooms', 'name', list => { rooms = list; rerenderCurrentPage(); });
+    watchCol('tenants', 'name', list => { tenants = list; rerenderCurrentPage(); });
+    watchCol('readings', 'date', list => { readings = list.reverse(); rerenderCurrentPage(); });
+    watchCol('bills', 'month', list => { bills = list.reverse(); rerenderCurrentPage(); });
+    watchCol('complaints', 'date', list => { complaints = list.reverse(); rerenderCurrentPage(); });
+  }
+  function rerenderCurrentPage() {
+    if (currentPage === 'dashboard')     renderDashboard();
+    else if (currentPage === 'rooms')    renderRoomsGrid();
+    else if (currentPage === 'tenants')  renderTenantsTable();
+    else if (currentPage === 'readings') { populateRoomFilter('readings-room-filter',readings); filterReadings(); }
+    else if (currentPage === 'billing')  { populateRoomFilter('bills-room-filter',bills); filterBills(); }
+    else if (currentPage === 'complaints') filterComplaints();
+    else if (currentPage === 'room-detail' && activeRoomId) renderRoomDetail(activeRoomId);
+    populateRoomSelect('tf-roomId'); populateRoomSelect('rdf-roomId');
+    populateRoomSelect('bf-roomId'); populateRoomSelect('cf-roomId');
+  }
+
+  // ── Navigation ────────────────────────────────────────────────────────────
+  let activeRoomId = null; // the room currently "opened" (its own scoped environment)
+
+  function navigate(page, opts) {
+    currentPage = page;
+    document.querySelectorAll('[data-nav]').forEach(el => el.classList.toggle('active', el.dataset.nav===page));
+    document.querySelectorAll('.page').forEach(p => p.style.display = p.id==='page-'+page ? 'block' : 'none');
+    document.getElementById('sidebar').classList.remove('open');
+    const titles = { dashboard:'Dashboard', rooms:'Rooms', tenants:'Tenants', readings:'Meter Readings', billing:'Billing', complaints:'Complaints & Notes', ai:'AI Assistant', 'room-detail':'Room' };
+    document.getElementById('topbar-title').textContent = titles[page] || page;
+    if (page !== 'room-detail') activeRoomId = null;
+    loadPage(page, opts);
+  }
+
+  async function loadPage(page, opts) {
+    setLoading(page, true);
+    try {
+      switch(page) {
+        case 'dashboard':  renderDashboard();  break;
+        case 'rooms':      renderRoomsGrid();       break;
+        case 'tenants':    populateRoomSelect('tf-roomId'); renderTenantsTable();     break;
+        case 'readings':   populateRoomSelect('rdf-roomId'); populateRoomFilter('readings-room-filter',readings); filterReadings();    break;
+        case 'billing':    setupBillingForm(); populateRoomFilter('bills-room-filter',bills); setDefaultMonth(); filterBills();    break;
+        case 'complaints': populateRoomSelect('cf-roomId'); populateRoomFilter('complaints-room-filter',complaints); filterComplaints();  break;
+        case 'ai':         await initAiPage();      break;
+        case 'room-detail':
+          activeRoomId = opts && opts.roomId ? opts.roomId : activeRoomId;
+          renderRoomDetail(activeRoomId);
+          break;
+      }
+    } catch(e) { showToast('Firebase error: '+e.message,'error'); console.error(e); }
+    setLoading(page, false);
+  }
+  window.openRoom = function(id) { navigate('room-detail', { roomId: id }); };
+  window.backToRooms = function() { navigate('rooms'); };
+
+  function setLoading(page, on) {
+    const el = document.querySelector(`#page-${page} .page-loader`);
+    if (el) el.style.display = on ? 'flex' : 'none';
+  }
+
+  // ── DASHBOARD ─────────────────────────────────────────────────────────────
+  function renderDashboard() {
+    const occupied=rooms.filter(r=>r.status==='occupied').length;
+    const vacant=rooms.filter(r=>r.status==='vacant').length;
+    const maintenance=rooms.filter(r=>r.status==='maintenance').length;
+    const revenue=bills.filter(b=>b.paid).reduce((s,b)=>s+(b.total||0),0);
+    const pending=bills.filter(b=>!b.paid);
+    const openComp=complaints.filter(c=>c.status!=='resolved').length;
+    document.getElementById('stat-rooms').textContent      = rooms.length;
+    document.getElementById('stat-occupied').textContent   = occupied;
+    document.getElementById('stat-vacant').textContent     = vacant;
+    document.getElementById('stat-maintenance').textContent= maintenance;
+    document.getElementById('stat-revenue').textContent    = 'KES '+revenue.toLocaleString('en-KE',{minimumFractionDigits:0});
+    document.getElementById('stat-pending-count').textContent = pending.length;
+    document.getElementById('stat-complaints').textContent = openComp;
+    document.getElementById('stat-tenants').textContent    = tenants.length;
+    const ul = document.getElementById('pending-list');
+    if(pending.length===0){ ul.innerHTML='<li class="empty-item">✓ All bills settled</li>'; }
+    else { ul.innerHTML=pending.slice(0,8).map(b=>{ const room=rooms.find(r=>r.id===b.roomId); return `<li class="pending-item"><span class="pi-room">${room?room.name:'Unknown'} <span class="pi-month">${b.month||''}</span></span><span class="pi-amt">KES ${(b.total||0).toLocaleString('en-KE',{minimumFractionDigits:0})}</span><button class="btn-xs btn-green" onclick="markPaid('${b.id}')">Mark Paid</button></li>`; }).join(''); }
+    const cl=document.getElementById('complaints-preview');
+    const openList=complaints.filter(c=>c.status!=='resolved').slice(0,5);
+    if(openList.length===0){ cl.innerHTML='<li class="empty-item">No open issues</li>'; }
+    else { cl.innerHTML=openList.map(c=>{ const room=rooms.find(r=>r.id===c.roomId); return `<li class="pending-item"><span class="pi-room">${room?room.name:'—'} <span class="pi-month tag-${c.type}">${c.type}</span></span><span class="comp-subject">${c.subject||''}</span><span class="status-badge status-${c.status}">${c.status}</span></li>`; }).join(''); }
+  }
+  window.markPaid = async function(billId) {
+    try { await updDoc('bills',billId,{paid:true}); showToast('Marked as paid'); }
+    catch(e){ showToast(e.message,'error'); }
+  };
+
+  // ── ROOMS ─────────────────────────────────────────────────────────────────
+  // Each room is an independent, self-contained environment: its own
+  // readings, bills, tenant, complaint history and PDF catalog. The only
+  // way to see that history is to open the room itself.
+  function renderRoomsGrid() {
+    const grid = document.getElementById('rooms-grid');
+    if(rooms.length===0){ grid.innerHTML='<div class="empty-state"><div class="empty-icon">🏠</div><p>No rooms yet. Add your first room.</p></div>'; return; }
+    grid.innerHTML=rooms.map(r=>`
+      <div class="room-card" onclick="openRoom('${r.id}')">
+        <div class="room-card-header"><span class="room-name">${r.name}</span><span class="status-badge status-${r.status}">${r.status}</span></div>
+        <div class="room-meta">${r.floor?`<span>Floor ${r.floor}</span>`:''} ${r.desc?`<span>${r.desc}</span>`:''}</div>
+        <div class="room-rates">
+          <div class="rate-pill">🏠 KES ${(r.rent||0).toLocaleString()}/mo</div>
+          <div class="rate-pill">💧 ${r.waterRate||0}/unit</div>
+          <div class="rate-pill">⚡ ${r.powerRate||0}/kWh</div>
+        </div>
+        ${r.paymentDesc?`<div class="room-notes">${r.paymentDesc}</div>`:''}
+        <div class="card-actions" onclick="event.stopPropagation()">
+          <button class="btn-sm btn-secondary" onclick="openRoom('${r.id}')">Open</button>
+          <button class="btn-sm btn-secondary" onclick="editRoom('${r.id}')">Edit</button>
+          <button class="btn-sm btn-danger" onclick="deleteRoom('${r.id}','${r.name}')">Delete</button>
+        </div>
+      </div>`).join('');
+  }
+
+  // ── ROOM DETAIL (independent room environment) ──────────────────────────
+  function renderRoomDetail(roomId) {
+    const r = rooms.find(x=>x.id===roomId);
+    const el = document.getElementById('room-detail-content');
+    if (!r) { el.innerHTML = '<div class="empty-state"><p>Room not found.</p></div>'; return; }
+    document.getElementById('topbar-title').textContent = r.name;
+    const tenant = tenants.find(t=>t.roomId===r.id);
+    const roomReadings = readings.filter(x=>x.roomId===r.id);
+    const roomBills = bills.filter(x=>x.roomId===r.id);
+    const roomComplaints = complaints.filter(x=>x.roomId===r.id);
+    const pdfCount = roomBills.filter(b=>b.pdfDataUrl).length;
+
+    el.innerHTML = `
+      <div class="room-detail-header">
+        <div>
+          <h1 class="page-title">${r.name} <span class="status-badge status-${r.status}">${r.status}</span></h1>
+          <div class="room-meta">${r.floor?`<span>Floor ${r.floor}</span>`:''} ${r.desc?`<span>${r.desc}</span>`:''}</div>
+        </div>
+        <div class="card-actions">
+          <button class="btn-sm btn-secondary" onclick="editRoom('${r.id}')">Edit Room</button>
+          <button class="btn-primary" onclick="backToRooms()">← All Rooms</button>
+        </div>
+      </div>
+
+      <div class="stat-grid">
+        <div class="stat-card"><div class="stat-label">Monthly Rent</div><div class="stat-value accent" style="font-size:16px">KES ${(r.rent||0).toLocaleString()}</div></div>
+        <div class="stat-card"><div class="stat-label">Water / Power Rate</div><div class="stat-value" style="font-size:16px">${r.waterRate||0} / ${r.powerRate||0}</div></div>
+        <div class="stat-card"><div class="stat-label">Baseline Readings</div><div class="stat-value" style="font-size:16px">💧${r.lastWaterReading ?? r.initWater ?? 0} ⚡${r.lastPowerReading ?? r.initPower ?? 0}</div></div>
+        <div class="stat-card"><div class="stat-label">PDF Slips</div><div class="stat-value dim">${pdfCount}</div></div>
+      </div>
+
+      <div class="dash-card" style="margin-bottom:16px">
+        <div class="dash-card-title">Tenant</div>
+        ${tenant ? `<div class="room-notes"><strong>${tenant.name}</strong> · ${tenant.phone||'—'} · ${tenant.email||'—'}<br>Move-in: ${tenant.moveIn||'—'} · Lease end: ${tenant.leaseEnd||'—'}</div>
+          <div class="card-actions"><button class="btn-sm btn-secondary" onclick="editTenant('${tenant.id}')">Edit Tenant</button></div>`
+          : `<div class="room-notes">No tenant assigned to this room.</div><div class="card-actions"><button class="btn-sm btn-primary" onclick="openNewModal('modal-tenant');setVal('tf-roomId','${r.id}')">+ Assign Tenant</button></div>`}
+      </div>
+
+      <div class="dash-grid">
+        <div class="dash-card">
+          <div class="dash-card-title">Reading History (${roomReadings.length}) <button class="btn-xs btn-primary" style="float:right" onclick="openNewModal('modal-reading');setVal('rdf-roomId','${r.id}')">+ Add</button></div>
+          <ul>${roomReadings.length? roomReadings.map(x=>`<li class="pending-item"><span class="pi-room">${x.date}</span><span class="num-cell">💧${x.water??'—'} ⚡${x.power??'—'}</span></li>`).join('') : '<li class="empty-item">No readings yet</li>'}</ul>
+        </div>
+        <div class="dash-card">
+          <div class="dash-card-title">Complaints & Notes (${roomComplaints.length}) <button class="btn-xs btn-primary" style="float:right" onclick="openNewModal('modal-complaint');setVal('cf-roomId','${r.id}')">+ Add</button></div>
+          <ul>${roomComplaints.length? roomComplaints.map(x=>`<li class="pending-item"><span class="pi-room">${x.subject} <span class="pi-month tag-${x.type}">${x.type}</span></span><span class="status-badge status-${x.status}">${x.status}</span></li>`).join('') : '<li class="empty-item">Nothing logged</li>'}</ul>
+        </div>
+      </div>
+
+      <div class="dash-card" style="margin-top:16px">
+        <div class="dash-card-title">Billing History & PDF Catalog (${roomBills.length}) <button class="btn-xs btn-primary" style="float:right" onclick="openNewModal('modal-billing');setVal('bf-roomId','${r.id}');bfRoomChanged()">+ Generate Bill</button></div>
+        <div class="table-wrap">
+          <table><thead><tr><th>Month</th><th>Total</th><th>Status</th><th>Slip / Send</th></tr></thead>
+          <tbody>${roomBills.length? roomBills.map(b=>`<tr class="${b.paid?'row-paid':''}">
+              <td>${b.month||'—'}</td>
+              <td class="num-cell">KES ${(b.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</td>
+              <td><span class="status-badge status-${b.paid?'occupied':'unpaid'}">${b.paid?'Paid':'Unpaid'}</span></td>
+              <td class="td-actions">${b.pdfDataUrl ? `<a class="btn-xs btn-secondary" href="${b.pdfDataUrl}" download="${(r.name||'room')}-${b.month||'bill'}.pdf">⬇ PDF</a>` : `<button class="btn-xs btn-secondary" onclick="generateBillPdf('${b.id}')">📄 PDF</button>`}<button class="btn-xs btn-sms" onclick="sendBillSms('${b.id}')" title="Send via SMS">📲 SMS</button><button class="btn-xs btn-whatsapp" onclick="sendBillWhatsApp('${b.id}')" title="Send via WhatsApp">💬 WA</button></td>
+            </tr>`).join('') : '<tr><td colspan="4" class="empty-td">No bills yet.</td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+  window.editRoom = function(id) {
+    const r=rooms.find(x=>x.id===id); if(!r) return;
+    editTarget=r;
+    fillForm('room-form',{'rf-name':r.name,'rf-floor':r.floor,'rf-desc':r.desc,'rf-rent':r.rent,'rf-waterRate':r.waterRate,'rf-powerRate':r.powerRate,'rf-initWater':r.initWater,'rf-initPower':r.initPower,'rf-paymentDesc':r.paymentDesc,'rf-status':r.status});
+    document.getElementById('room-form-title').textContent='Edit Room';
+    openModal('modal-room');
+  };
+  window.deleteRoom = async function(id,name) {
+    if(!confirm(`Delete room "${name}"?`)) return;
+    try{ await delDoc('rooms',id); showToast('Room deleted'); }
+    catch(e){ showToast(e.message,'error'); }
+  };
+  window.saveRoom = async function() {
+    const name=val('rf-name'); if(!name){ showToast('Room name required','error'); return; }
+    const data={name,floor:val('rf-floor'),desc:val('rf-desc'),rent:num('rf-rent'),waterRate:num('rf-waterRate'),powerRate:num('rf-powerRate'),initWater:num('rf-initWater'),initPower:num('rf-initPower'),paymentDesc:val('rf-paymentDesc'),status:val('rf-status')||'vacant'};
+    // "Meter replaced" — the landlord is telling us the physical meter was
+    // swapped, so the old carried-forward baseline no longer applies and
+    // the new Initial Reading fields become the fresh baseline instead.
+    if (document.getElementById('rf-meterReplaced')?.checked) {
+      data.lastWaterReading = num('rf-initWater');
+      data.lastPowerReading = num('rf-initPower');
+      data.meterReplacedAt = new Date().toISOString();
+    }
+    try{
+      if(editTarget) await setDoc2('rooms',editTarget.id,data); else await addDoc2('rooms',data);
+      showToast(editTarget?'Room updated':'Room added'); closeModal('modal-room');
+    }catch(e){ showToast(e.message,'error'); }
+  };
+
+  // ── TENANTS ───────────────────────────────────────────────────────────────
+  function renderTenantsTable() {
+    const tbody=document.getElementById('tenants-tbody');
+    if(tenants.length===0){ tbody.innerHTML='<tr><td colspan="7" class="empty-td">No tenants yet.</td></tr>'; return; }
+    tbody.innerHTML=tenants.map(t=>{ const room=rooms.find(r=>r.id===t.roomId); return `<tr><td><strong>${t.name}</strong><br><small class="text-dim">${t.idNum||''}</small></td><td>${room?room.name:'<em>Unassigned</em>'}</td><td>${t.phone||'—'}</td><td>${t.email||'—'}</td><td>${t.moveIn||'—'}</td><td>${t.leaseEnd||'—'}</td><td class="td-actions"><button class="btn-xs btn-secondary" onclick="editTenant('${t.id}')">Edit</button><button class="btn-xs btn-danger" onclick="deleteTenant('${t.id}','${t.name}')">Delete</button></td></tr>`; }).join('');
+  }
+  window.editTenant = function(id) {
+    const t=tenants.find(x=>x.id===id); if(!t) return;
+    editTarget=t;
+    fillForm('tenant-form',{'tf-name':t.name,'tf-idNum':t.idNum,'tf-phone':t.phone,'tf-email':t.email,'tf-gender':t.gender,'tf-occupants':t.occupants,'tf-moveIn':t.moveIn,'tf-leaseEnd':t.leaseEnd,'tf-roomId':t.roomId,'tf-deposit':t.deposit,'tf-notes':t.notes});
+    document.getElementById('tenant-form-title').textContent='Edit Tenant';
+    openModal('modal-tenant');
+  };
+  window.deleteTenant = async function(id,name) {
+    if(!confirm(`Remove tenant "${name}"?`)) return;
+    try{ await delDoc('tenants',id); showToast('Tenant removed'); }
+    catch(e){ showToast(e.message,'error'); }
+  };
+  window.saveTenant = async function() {
+    const name=val('tf-name'); if(!name){ showToast('Name required','error'); return; }
+    const data={name,idNum:val('tf-idNum'),phone:val('tf-phone'),email:val('tf-email'),gender:val('tf-gender'),occupants:parseInt(val('tf-occupants'))||1,moveIn:val('tf-moveIn'),leaseEnd:val('tf-leaseEnd'),roomId:val('tf-roomId'),deposit:num('tf-deposit'),notes:val('tf-notes')};
+    try{
+      if(editTarget) await setDoc2('tenants',editTarget.id,data); else await addDoc2('tenants',data);
+      if(data.roomId) await updDoc('rooms',data.roomId,{status:'occupied'});
+      showToast(editTarget?'Tenant updated':'Tenant added'); closeModal('modal-tenant');
+    }catch(e){ showToast(e.message,'error'); }
+  };
+
+  // ── READINGS ──────────────────────────────────────────────────────────────
+  function renderReadings(list) {
+    const tbody=document.getElementById('readings-tbody');
+    if(list.length===0){ tbody.innerHTML='<tr><td colspan="7" class="empty-td">No readings recorded.</td></tr>'; return; }
+    tbody.innerHTML=list.map(r=>{ const room=rooms.find(x=>x.id===r.roomId); return `<tr><td>${r.date||'—'}</td><td>${room?room.name:'—'}</td><td class="num-cell">💧 ${r.water??'—'}</td><td class="num-cell">⚡ ${r.power??'—'}</td><td><span class="status-badge status-${r.rentStatus||'unpaid'}">${r.rentStatus||'—'}</span></td><td class="num-cell">${r.amountPaid?'KES '+r.amountPaid.toLocaleString():'—'}</td><td><button class="btn-xs btn-danger" onclick="deleteReading('${r.id}')">✕</button></td></tr>`; }).join('');
+  }
+  window.filterReadings = function() { const roomId=document.getElementById('readings-room-filter').value; renderReadings(roomId?readings.filter(r=>r.roomId===roomId):readings); };
+  window.deleteReading = async function(id) {
+    if(!confirm('Delete this reading?')) return;
+    try{ await delDoc('readings',id); showToast('Deleted'); }
+    catch(e){ showToast(e.message,'error'); }
+  };
+  window.saveReading = async function() {
+    const roomId=val('rdf-roomId'),date=val('rdf-date');
+    if(!roomId||!date){ showToast('Room and date required','error'); return; }
+    const data={roomId,date,water:num('rdf-water'),power:num('rdf-power'),rentStatus:val('rdf-rentStatus')||'paid',amountPaid:num('rdf-amountPaid'),notes:val('rdf-notes')};
+    try{ await addDoc2('readings',data); showToast('Reading saved'); closeModal('modal-reading'); }
+    catch(e){ showToast(e.message,'error'); }
+  };
+
+  // ── BILLING ───────────────────────────────────────────────────────────────
+  // Reading-consistency rule: once a bill is finalized, its Final Reading
+  // becomes the locked default Initial Reading for that room's next bill —
+  // so nothing gets typed twice and nothing drifts out of sync. The
+  // "Meter replaced" checkbox on the room is the only way to override it.
+  function setupBillingForm() {
+    document.getElementById('bf-roomId').onchange = bfRoomChanged;
+  }
+  window.bfRoomChanged = function(){
+    const room=rooms.find(r=>r.id===val('bf-roomId')); if(!room) return;
+    setVal('bf-baseRent',room.rent); setVal('bf-waterRate',room.waterRate); setVal('bf-powerRate',room.powerRate);
+    const hasBaseline = room.lastWaterReading!=null || room.lastPowerReading!=null;
+    const wInit = hasBaseline ? (room.lastWaterReading ?? 0) : (room.initWater||0);
+    const pInit = hasBaseline ? (room.lastPowerReading ?? 0) : (room.initPower||0);
+    setVal('bf-waterInit', wInit); setVal('bf-powerInit', pInit);
+    // Lock the carried-forward baseline to keep readings consistent bill to
+    // bill — landlord can still unlock via "Meter replaced" on the room.
+    document.getElementById('bf-waterInit').readOnly = true;
+    document.getElementById('bf-powerInit').readOnly = true;
+    document.getElementById('bf-baseline-note').textContent = hasBaseline
+      ? '🔒 Carried forward from the last finalized bill for consistency. To change it, edit the room and check "Meter replaced".'
+      : 'ℹ First bill for this room — using its Initial Reading.';
+    setVal('bf-waterFinal',''); setVal('bf-powerFinal','');
+    calculateBill();
+  };
+  function setDefaultMonth(){ const now=new Date(); setVal('bf-month',`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`); }
+  window.calculateBill = function(){
+    const wI=num('bf-waterInit'),wF=num('bf-waterFinal'),pI=num('bf-powerInit'),pF=num('bf-powerFinal');
+    const wR=num('bf-waterRate'),pR=num('bf-powerRate'),rent=num('bf-baseRent');
+    const wUsed=Math.max(0,wF-wI),pUsed=Math.max(0,pF-pI),wCost=wUsed*wR,pCost=pUsed*pR,total=rent+wCost+pCost;
+    document.getElementById('bill-preview').style.display='block';
+    document.getElementById('bp-water').textContent=`Water: ${wI} → ${wF}  (${wUsed.toFixed(2)} units × ${wR}) = KES ${wCost.toFixed(2)}`;
+    document.getElementById('bp-power').textContent=`Power: ${pI} → ${pF}  (${pUsed.toFixed(2)} kWh × ${pR}) = KES ${pCost.toFixed(2)}`;
+    document.getElementById('bp-rent').textContent=`Rent: KES ${rent.toFixed(2)}`;
+    document.getElementById('bp-total').textContent=`Total: KES ${total.toFixed(2)}`;
+    document.getElementById('saveBillBtn').disabled=false;
+  };
+  window.saveBill = async function(){
+    const roomId=val('bf-roomId'),month=val('bf-month');
+    if(!roomId){ showToast('Select a room','error'); return; }
+    if(!month){ showToast('Month required','error'); return; }
+    const wI=num('bf-waterInit'),wF=num('bf-waterFinal'),pI=num('bf-powerInit'),pF=num('bf-powerFinal');
+    const wR=num('bf-waterRate'),pR=num('bf-powerRate'),rent=num('bf-baseRent');
+    const wUsed=Math.max(0,wF-wI),pUsed=Math.max(0,pF-pI),wCost=wUsed*wR,pCost=pUsed*pR;
+    const data={roomId,month,rent,waterInit:wI,waterFinal:wF,waterUsed:wUsed,waterRate:wR,waterCost:wCost,powerInit:pI,powerFinal:pF,powerUsed:pUsed,powerRate:pR,powerCost:pCost,total:rent+wCost+pCost,paid:false,createdAt:new Date().toISOString()};
+    try{
+      await addDoc2('bills',data);
+      // Finalize the reading consistency chain: this bill's Final Reading
+      // becomes next month's locked Initial Reading for this room.
+      await updDoc('rooms',roomId,{lastWaterReading:wF, lastPowerReading:pF, lastBillMonth:month});
+      showToast('Bill saved'); closeModal('modal-billing');
+    }
+    catch(e){ showToast(e.message,'error'); }
+  };
+  window.togglePaid = async function(id,current){ try{ await updDoc('bills',id,{paid:!current}); showToast(!current?'Marked paid':'Marked unpaid'); }catch(e){ showToast(e.message,'error'); } };
+  window.deleteBill = async function(id){ if(!confirm('Delete this bill?')) return; try{ await delDoc('bills',id); showToast('Deleted'); }catch(e){ showToast(e.message,'error'); } };
+
+  // ── OFFICIAL PDF PAYMENT SLIP ────────────────────────────────────────────
+  // Builds the formal invoice/statement layout with jsPDF from a flat
+  // "meta" object, so the exact same renderer works both for the
+  // landlord's own in-app PDF and for the public slip page a tenant opens
+  // from an SMS/WhatsApp link (see buildInvoicePdf below).
+  function buildInvoicePdf(meta) {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit:'pt', format:'a4' });
+    const pageW = doc.internal.pageSize.getWidth();
+    const marginX = 48;
+    let y = 56;
+
+    doc.setFont('helvetica','bold'); doc.setFontSize(20); doc.setTextColor(20,20,20);
+    doc.text(meta.buildingName || 'RentReview', marginX, y);
+    doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(100,100,100);
+    doc.text('Official Payment Statement', marginX, y+16);
+    doc.setFontSize(9);
+    if (meta.issuedBy) doc.text(`Issued by ${meta.issuedBy}`, pageW-marginX, y-4, { align:'right' });
+    doc.text(`Generated: ${meta.generatedAt || new Date().toLocaleString('en-KE')}`, pageW-marginX, y+10, { align:'right' });
+    y += 30;
+    doc.setDrawColor(180,180,180); doc.line(marginX, y, pageW-marginX, y);
+    y += 26;
+
+    doc.setFont('helvetica','bold'); doc.setFontSize(13); doc.setTextColor(20,20,20);
+    doc.text('PAYMENT INVOICE', marginX, y); y += 22;
+    doc.setFont('helvetica','normal'); doc.setFontSize(10.5); doc.setTextColor(40,40,40);
+    const metaLeft = [
+      ['Room', meta.roomName || '—'],
+      ['Billing Month', meta.month || '—'],
+      ['Status', meta.paid ? 'PAID' : 'PENDING'],
+    ];
+    const metaRight = [
+      ['Tenant', meta.tenantName || '—'],
+      ['Phone', meta.tenantPhone || '—'],
+      ['Email', meta.tenantEmail || '—'],
+    ];
+    let my = y;
+    metaLeft.forEach(([k,v])=>{ doc.setFont('helvetica','bold'); doc.text(k+':', marginX, my); doc.setFont('helvetica','normal'); doc.text(String(v), marginX+90, my); my+=16; });
+    let my2 = y;
+    metaRight.forEach(([k,v])=>{ doc.setFont('helvetica','bold'); doc.text(k+':', marginX+280, my2); doc.setFont('helvetica','normal'); doc.text(String(v), marginX+350, my2); my2+=16; });
+    y = Math.max(my,my2) + 18;
+
+    const col = [marginX, marginX+230, marginX+330, marginX+430];
+    doc.setFillColor(30,30,30); doc.rect(marginX, y, pageW-2*marginX, 22, 'F');
+    doc.setTextColor(255,255,255); doc.setFont('helvetica','bold'); doc.setFontSize(10);
+    doc.text('Item', col[0]+8, y+15); doc.text('Detail', col[1], y+15); doc.text('Rate', col[2], y+15); doc.text('Amount (KES)', pageW-marginX-8, y+15, { align:'right' });
+    y += 22;
+    doc.setTextColor(30,30,30); doc.setFont('helvetica','normal');
+    const rows = [
+      ['Rent', '—', '—', (meta.rent||0)],
+      ['Water', `${meta.waterInit??0} → ${meta.waterFinal??0}  (${(meta.waterUsed||0).toFixed(2)} units)`, String(meta.waterRate||0), (meta.waterCost||0)],
+      ['Power', `${meta.powerInit??0} → ${meta.powerFinal??0}  (${(meta.powerUsed||0).toFixed(2)} kWh)`, String(meta.powerRate||0), (meta.powerCost||0)],
+    ];
+    rows.forEach((r,i)=>{
+      const ry = y + i*22 + 15;
+      if (i%2===1) { doc.setFillColor(245,245,245); doc.rect(marginX, y+i*22, pageW-2*marginX, 22, 'F'); }
+      doc.text(r[0], col[0]+8, ry); doc.text(r[1], col[1], ry); doc.text(r[2], col[2], ry);
+      doc.text(Number(r[3]).toLocaleString('en-KE',{minimumFractionDigits:2}), pageW-marginX-8, ry, { align:'right' });
+    });
+    y += rows.length*22 + 6;
+    doc.setDrawColor(180,180,180); doc.line(marginX, y, pageW-marginX, y); y += 20;
+
+    doc.setFont('helvetica','bold'); doc.setFontSize(13);
+    doc.text('TOTAL DUE', marginX, y);
+    doc.text(`KES ${(meta.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}`, pageW-marginX-8, y, { align:'right' });
+    y += 34;
+
+    doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(90,90,90);
+    doc.text(meta.paymentDesc || 'Please settle this amount by the agreed due date.', marginX, y);
+    y += 40;
+    doc.setDrawColor(210,210,210); doc.line(marginX, y, pageW-marginX, y); y += 16;
+    doc.setFontSize(8.5); doc.setTextColor(140,140,140);
+    doc.text(`${meta.buildingName || 'RentReview'} · Generated automatically via RentReview · This is a system-generated statement.`, marginX, y);
+    return doc;
+  }
+
+  function billToMeta(b, room, tenant) {
+    return {
+      buildingName, roomName: room?room.name:null, tenantName: tenant?tenant.name:null,
+      tenantPhone: tenant?tenant.phone:null, tenantEmail: tenant?tenant.email:null,
+      month: b.month, paid: !!b.paid, rent: b.rent||0,
+      waterInit: b.waterInit, waterFinal: b.waterFinal, waterUsed: b.waterUsed, waterRate: b.waterRate, waterCost: b.waterCost||0,
+      powerInit: b.powerInit, powerFinal: b.powerFinal, powerUsed: b.powerUsed, powerRate: b.powerRate, powerCost: b.powerCost||0,
+      total: b.total||0, paymentDesc: room?.paymentDesc, issuedBy: currentUser?.email,
+    };
+  }
+
+  // ── SHAREABLE SLIP LINK (no Firebase Storage needed) ─────────────────────
+  // Instead of uploading a PDF file anywhere, we publish just the bill's
+  // display data to a public Firestore doc (small, text-only) and hand out
+  // a link back into this same app: rentreview.html?slip=<id>. Opening
+  // that link — no sign-in required — shows the tenant a clean invoice
+  // page and lets *their own browser* generate and download the PDF on
+  // the spot via jsPDF. Nothing is ever hosted or stored as a file.
+  async function ensureShareLink(billId) {
+    const b = bills.find(x=>x.id===billId);
+    if (!b) throw new Error('Bill not found');
+    const room = rooms.find(r=>r.id===b.roomId);
+    const tenant = tenants.find(t=>t.roomId===b.roomId);
+    const meta = billToMeta(b, room, tenant);
+    meta.generatedAt = new Date().toLocaleString('en-KE');
+    meta.ownerUid = currentUser.uid;
+    try {
+      await setDoc(doc(db,'publicSlips',billId), meta, { merge:true });
+    } catch(e) {
+      console.error('publicSlips write failed', e);
+      throw new Error('Could not publish the shareable slip — check the publicSlips Firestore rule (see setup notes).');
+    }
+    const shareUrl = `${location.origin}${location.pathname}?slip=${billId}`;
+    const dataUrl = buildInvoicePdf(meta).output('datauristring');
+    await updDoc('bills', billId, { pdfDataUrl:dataUrl, shareUrl, pdfGeneratedAt:new Date().toISOString() });
+    return { dataUrl, shareUrl };
+  }
+
+  window.generateBillPdf = async function(billId) {
+    try { await ensureShareLink(billId); showToast('Slip ready ✓'); }
+    catch(e) { console.error(e); showToast(e.message, 'error'); }
+  };
+
+  // ── SEND SLIP VIA SMS / WHATSAPP ─────────────────────────────────────────
+  // The only thing we need from the account is the tenant's phone number —
+  // everything else (link, message wording, country-code formatting) is
+  // automatic. SMS uses the standard "sms:" URI scheme (opens the phone's
+  // native Messages app pre-filled); WhatsApp uses the official wa.me
+  // click-to-chat link. Both are native browser/OS behaviour — no paid
+  // SMS gateway, no file storage, nothing that can silently break.
+  function billMessageText(b, room, tenant, shareUrl) {
+    const who = tenant?.name ? `Hi ${tenant.name},` : 'Hi,';
+    return `${who} here is your ${b.month||''} rent statement for ${room?room.name:'your room'} at ${buildingName||'RentReview'}. `
+         + `Total due: KES ${(b.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}. `
+         + `View/download your slip: ${shareUrl}`;
+  }
+
+  async function resolveSendTarget(billId) {
+    const b = bills.find(x=>x.id===billId); if(!b) throw new Error('Bill not found');
+    const room = rooms.find(r=>r.id===b.roomId);
+    const tenant = tenants.find(t=>t.roomId===b.roomId);
+    if (!tenant)            throw new Error('No tenant assigned to this room yet');
+    if (!tenant.phone)      throw new Error('No phone number on file for this tenant');
+    const phone = normalizePhone(tenant.phone);
+    if (!phone)             throw new Error(`Couldn't recognize "${tenant.phone}" as a valid phone number`);
+    return { b, room, tenant, phone };
+  }
+
+  window.sendBillSms = async function(billId) {
+    try {
+      const { b, room, tenant, phone } = await resolveSendTarget(billId);
+      showToast('Preparing slip…');
+      const { shareUrl } = await ensureShareLink(billId);
+      const text = billMessageText(b, room, tenant, shareUrl);
+      // iOS and Android use different separators for a pre-filled SMS body —
+      // this is the well-known, widely-used compatibility trick.
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+      const sep = isIOS ? '&' : '?';
+      window.location.href = `sms:${phone}${sep}body=${encodeURIComponent(text)}`;
+    } catch(e) { showToast(e.message, 'error'); }
+  };
+
+  window.sendBillWhatsApp = async function(billId) {
+    try {
+      const { b, room, tenant, phone } = await resolveSendTarget(billId);
+      showToast('Preparing slip…');
+      const { shareUrl } = await ensureShareLink(billId);
+      const text = billMessageText(b, room, tenant, shareUrl);
+      window.open(`https://wa.me/${phone}?text=${encodeURIComponent(text)}`, '_blank');
+    } catch(e) { showToast(e.message, 'error'); }
+  };
+
+  // ── PUBLIC SLIP PAGE ──────────────────────────────────────────────────────
+  // Reached via ?slip=<billId> with no sign-in. Reads the one sanitized
+  // public doc for that bill and renders a clean, mobile-friendly invoice
+  // the tenant can view, print, or download as a PDF generated right in
+  // their own browser.
+  async function renderPublicSlipPage(slipId) {
+    document.getElementById('loginScreen').style.display='none';
+    document.getElementById('onboardScreen').style.display='none';
+    document.getElementById('appShell').style.display='none';
+    const el = document.getElementById('slipScreen');
+    el.style.display='flex';
+    el.innerHTML = `<div class="slip-box"><div class="slip-loading">Loading your statement…</div></div>`;
+    let meta;
+    try {
+      const snap = await getDoc(doc(db,'publicSlips',slipId));
+      if (!snap.exists()) throw new Error('not found');
+      meta = snap.data();
+    } catch(e) {
+      el.innerHTML = `<div class="slip-box"><div class="slip-logo">⚠️</div><h2>Statement not found</h2><p class="slip-sub">This link may have expired or is no longer available. Please contact your landlord for an updated statement.</p></div>`;
+      return;
+    }
+    window.__slipMeta = meta; // used by the Download button below
+    el.innerHTML = `
+      <div class="slip-box">
+        <div class="slip-header">
+          <div>
+            <div class="slip-brand">${meta.buildingName || 'RentReview'}</div>
+            <div class="slip-sub">Official Payment Statement</div>
+          </div>
+          <span class="status-badge status-${meta.paid?'occupied':'unpaid'}">${meta.paid?'PAID':'PENDING'}</span>
+        </div>
+        <div class="slip-meta">
+          <div><span>Room</span><b>${meta.roomName||'—'}</b></div>
+          <div><span>Tenant</span><b>${meta.tenantName||'—'}</b></div>
+          <div><span>Billing Month</span><b>${meta.month||'—'}</b></div>
+          <div><span>Generated</span><b>${meta.generatedAt||'—'}</b></div>
+        </div>
+        <table class="slip-table">
+          <thead><tr><th>Item</th><th>Detail</th><th>Rate</th><th style="text-align:right">Amount (KES)</th></tr></thead>
+          <tbody>
+            <tr><td>Rent</td><td>—</td><td>—</td><td class="num-cell">${(meta.rent||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</td></tr>
+            <tr><td>Water</td><td>${meta.waterInit??0} → ${meta.waterFinal??0} (${(meta.waterUsed||0).toFixed(2)} units)</td><td>${meta.waterRate||0}</td><td class="num-cell">${(meta.waterCost||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</td></tr>
+            <tr><td>Power</td><td>${meta.powerInit??0} → ${meta.powerFinal??0} (${(meta.powerUsed||0).toFixed(2)} kWh)</td><td>${meta.powerRate||0}</td><td class="num-cell">${(meta.powerCost||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</td></tr>
+          </tbody>
+        </table>
+        <div class="slip-total"><span>Total Due</span><b>KES ${(meta.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</b></div>
+        ${meta.paymentDesc ? `<div class="slip-note">${meta.paymentDesc}</div>` : ''}
+        <div class="slip-actions">
+          <button class="btn-primary" onclick="downloadSlipPdf()">⬇ Download PDF</button>
+          <button class="btn-secondary" onclick="window.print()">🖨 Print</button>
+        </div>
+        <div class="slip-footer">Powered by RentReview</div>
+      </div>`;
+  }
+  window.downloadSlipPdf = function() {
+    const meta = window.__slipMeta; if (!meta) return;
+    const filename = `${(meta.roomName||'room')}-${meta.month||'bill'}.pdf`.replace(/\s+/g,'-');
+    buildInvoicePdf(meta).save(filename);
+  };
+
+  function renderBills(list){
+    const tbody=document.getElementById('bills-tbody');
+    if(list.length===0){ tbody.innerHTML='<tr><td colspan="8" class="empty-td">No bills yet.</td></tr>'; return; }
+    tbody.innerHTML=list.map(b=>{
+      const room=rooms.find(r=>r.id===b.roomId);
+      const pdfCell = b.pdfDataUrl
+        ? `<a class="btn-xs btn-secondary" href="${b.pdfDataUrl}" download="${(room?room.name:'room')}-${b.month||'bill'}.pdf">⬇ PDF</a>`
+        : `<button class="btn-xs btn-secondary" onclick="generateBillPdf('${b.id}')">📄 PDF</button>`;
+      return `<tr class="${b.paid?'row-paid':''}"><td>${b.month||'—'}</td><td>${room?room.name:'—'}</td><td class="num-cell">KES ${(b.waterCost||0).toFixed(2)}</td><td class="num-cell">KES ${(b.powerCost||0).toFixed(2)}</td><td class="num-cell">KES ${(b.rent||0).toFixed(2)}</td><td class="num-cell total-cell">KES ${(b.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</td><td class="td-actions"><button class="btn-xs ${b.paid?'btn-secondary':'btn-green'}" onclick="togglePaid('${b.id}',${b.paid})">${b.paid?'Paid ✓':'Mark Paid'}</button>${pdfCell}<button class="btn-xs btn-sms" onclick="sendBillSms('${b.id}')" title="Send via SMS">📲 SMS</button><button class="btn-xs btn-whatsapp" onclick="sendBillWhatsApp('${b.id}')" title="Send via WhatsApp">💬 WA</button><button class="btn-xs btn-danger" onclick="deleteBill('${b.id}')">✕</button></td></tr>`;
+    }).join('');
+  }
+  window.filterBills = function(){ const roomId=document.getElementById('bills-room-filter').value; renderBills(roomId?bills.filter(b=>b.roomId===roomId):bills); };
+
+  // ── COMPLAINTS ────────────────────────────────────────────────────────────
+  function renderComplaints(list){
+    const grid=document.getElementById('complaints-grid');
+    if(list.length===0){ grid.innerHTML='<div class="empty-state"><div class="empty-icon">📋</div><p>No items logged.</p></div>'; return; }
+    grid.innerHTML=list.map(c=>{ const room=rooms.find(r=>r.id===c.roomId); return `<div class="complaint-card type-${c.type}"><div class="complaint-header"><span class="tag-${c.type} comp-type-badge">${c.type}</span><span class="status-badge status-${c.status}">${c.status}</span><span class="comp-date">${c.date||''}</span></div><div class="comp-room">${room?room.name:'—'}</div><div class="comp-subject">${c.subject||''}</div><div class="comp-body">${c.body||''}</div><div class="card-actions">${c.status!=='resolved'?`<button class="btn-sm btn-green" onclick="resolveComplaint('${c.id}')">Resolve</button>`:''}<button class="btn-sm btn-danger" onclick="deleteComplaint('${c.id}')">Delete</button></div></div>`; }).join('');
+  }
+  window.filterComplaints = function(){
+    const roomId=document.getElementById('complaints-room-filter').value;
+    const status=document.getElementById('complaints-status-filter').value;
+    let list=complaints;
+    if(roomId) list=list.filter(c=>c.roomId===roomId);
+    if(status) list=list.filter(c=>c.status===status);
+    renderComplaints(list);
+  };
+  window.resolveComplaint = async function(id){ try{ await updDoc('complaints',id,{status:'resolved'}); showToast('Marked resolved'); }catch(e){ showToast(e.message,'error'); } };
+  window.deleteComplaint  = async function(id){ if(!confirm('Delete this entry?')) return; try{ await delDoc('complaints',id); showToast('Deleted'); }catch(e){ showToast(e.message,'error'); } };
+  window.saveComplaint = async function(){
+    const subject=val('cf-subject'); if(!subject){ showToast('Subject required','error'); return; }
+    const data={roomId:val('cf-roomId'),type:val('cf-type')||'complaint',subject,body:val('cf-body'),status:'open',date:new Date().toISOString().slice(0,10)};
+    try{ await addDoc2('complaints',data); showToast('Logged'); closeModal('modal-complaint'); }
+    catch(e){ showToast(e.message,'error'); }
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  AI PAGE
+  // ═══════════════════════════════════════════════════════════════════════
+
+  async function initAiPage() {
+    updateModelBadge();
+    if (!document.getElementById('ai-messages').children.length) {
+      appendAiBubble("Hello! I'm your Rent Review AI agent. I have full access to all your property data — rooms, tenants, bills, meter readings, and complaints. What would you like to know?");
+      await prefetchAiData();
+    }
+  }
+
+  async function prefetchAiData() {
+    setAiThinking(true);
+    try {
+      const [r,t,b,rd,c] = await Promise.all([
+        getCol('rooms',orderBy('name')),
+        getCol('tenants',orderBy('name')),
+        getCol('bills',orderBy('month','desc')),
+        getCol('readings',orderBy('date','desc')),
+        getCol('complaints',orderBy('date','desc'))
+      ]);
+      aiSnapshot = { rooms:r, tenants:t, bills:b, readings:rd, complaints:c };
+      setAiThinking(false);
+      appendAiBubble(`✓ Property data loaded — ${r.length} rooms · ${t.length} tenants · ${b.length} bills · ${rd.length} readings · ${c.length} complaints.\n\nAsk me anything!`);
+    } catch(e) {
+      setAiThinking(false);
+      appendAiBubble('⚠ Could not load property data: ' + e.message);
+    }
+  }
+
+  window.sendAiMessage = async function() {
+    const input = document.getElementById('aiInput');
+    const q = input.value.trim();
+    if (!q) return;
+    input.value = '';
+    appendUserBubble(q);
+    setAiThinking(true);
+    document.getElementById('ai-send-btn').disabled = true;
+
+    if (!aiSnapshot) {
+      try {
+        const [r,t,b,rd,c] = await Promise.all([
+          getCol('rooms',orderBy('name')),
+          getCol('tenants',orderBy('name')),
+          getCol('bills',orderBy('month','desc')),
+          getCol('readings',orderBy('date','desc')),
+          getCol('complaints',orderBy('date','desc'))
+        ]);
+        aiSnapshot = { rooms:r, tenants:t, bills:b, readings:rd, complaints:c };
+      } catch(e) {
+        setAiThinking(false);
+        document.getElementById('ai-send-btn').disabled=false;
+        appendAiBubble('⚠ Could not load data: '+e.message);
+        return;
+      }
+    }
+
+    const propertyContext = buildPromptString(aiSnapshot);
+    const userMessage = `=== PROPERTY DATA ===\n${propertyContext}\n=== END DATA ===\n\nQuestion: ${q}`;
+
+    // Add to chat history (keep last 6 turns to save tokens)
+    chatHistory.push({ role:'user', content: userMessage });
+    if (chatHistory.length > 12) chatHistory = chatHistory.slice(-12);
+
+    try {
+      const answer = await callGroq(chatHistory);
+      chatHistory.push({ role:'assistant', content: answer });
+      setAiThinking(false);
+      document.getElementById('ai-send-btn').disabled=false;
+      appendAiBubble(answer);
+    } catch(e) {
+      setAiThinking(false);
+      document.getElementById('ai-send-btn').disabled=false;
+      appendAiBubble('⚠ '+e.message);
+    }
+  };
+
+  async function callGroq(messages) {
+    const apiKey = AiPrefs.get('apiKey');
+    if (!apiKey) throw new Error('No API key set. Go to AI Settings to add your Groq key.');
+    const body = {
+      model:       AiPrefs.get('model'),
+      max_tokens:  AiPrefs.get('maxTokens'),
+      temperature: AiPrefs.get('temperature'),
+      messages: [
+        { role:'system', content: AiPrefs.get('systemPrompt') },
+        ...messages
+      ]
+    };
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+apiKey.trim() },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      const msg = data?.error?.message || JSON.stringify(data);
+      throw new Error('Groq error '+res.status+': '+msg);
+    }
+    return data.choices[0].message.content.trim();
+  }
+
+  function buildPromptString(snap) {
+    let sb = '';
+    sb += `ROOMS (${snap.rooms.length}):\n`;
+    snap.rooms.forEach(r => {
+      sb += `  - [${r.id}] ${r.name} | Floor:${r.floor||''} | Rent:${r.rent||0} | Status:${r.status} | WaterRate:${r.waterRate||0} PowerRate:${r.powerRate||0}\n`;
+    });
+    sb += `\nTENANTS (${snap.tenants.length}):\n`;
+    snap.tenants.forEach(t => {
+      sb += `  - [${t.id}] ${t.name} | Phone:${t.phone||''} | Room:${t.roomId||''} | Move-in:${t.moveIn||''} | Lease-end:${t.leaseEnd||''} | Deposit:${t.deposit||0} | Occupants:${t.occupants||1}\n`;
+    });
+    let totalRevenue=0, totalPending=0;
+    sb += `\nBILLS (${snap.bills.length}):\n`;
+    snap.bills.forEach(b => {
+      sb += `  - Room:${b.roomId} | Month:${b.month} | Rent:${b.rent||0} | Water:${b.waterCost||0} | Power:${b.powerCost||0} | Total:${b.total||0} | Paid:${b.paid?'YES':'NO'}\n`;
+      if(b.paid) totalRevenue+=(b.total||0); else totalPending+=(b.total||0);
+    });
+    sb += `  SUMMARY: Collected revenue=${totalRevenue.toFixed(0)} | Outstanding=${totalPending.toFixed(0)}\n`;
+    sb += `\nMETER READINGS (${snap.readings.length}):\n`;
+    snap.readings.slice(0,20).forEach(r => {
+      sb += `  - Room:${r.roomId} | Date:${r.date} | Water:${r.water||0} | Power:${r.power||0} | Rent-status:${r.rentStatus||''}\n`;
+    });
+    if(snap.readings.length>20) sb += `  ... (${snap.readings.length-20} older readings omitted)\n`;
+    sb += `\nCOMPLAINTS/NOTES (${snap.complaints.length}):\n`;
+    snap.complaints.forEach(c => {
+      sb += `  - [${c.id}] Room:${c.roomId||''} | Type:${c.type} | Subject:${c.subject} | Status:${c.status} | Date:${c.date}\n`;
+      if(c.body) sb += `    Body: ${c.body}\n`;
+    });
+    return sb;
+  }
+
+  window.clearAiChat = function() {
+    document.getElementById('ai-messages').innerHTML = '';
+    chatHistory = [];
+    appendAiBubble("Chat cleared. Hello again! I'm your Rent Review AI agent. What would you like to know about your property?");
+  };
+
+  window.refreshAiData = async function() {
+    aiSnapshot = null;
+    chatHistory = [];
+    appendAiBubble('♻ Refreshing property data…');
+    await prefetchAiData();
+  };
+
+  function appendUserBubble(text) {
+    const msgs = document.getElementById('ai-messages');
+    const div = document.createElement('div');
+    div.className = 'chat-bubble user-bubble';
+    div.textContent = text;
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  function appendAiBubble(text) {
+    const msgs = document.getElementById('ai-messages');
+    const div = document.createElement('div');
+    div.className = 'chat-bubble ai-bubble';
+    // Basic markdown-ish: bold, line breaks
+    div.innerHTML = text
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>')
+      .replace(/\n/g,'<br>');
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  function setAiThinking(on) {
+    document.getElementById('ai-thinking').style.display = on ? 'flex' : 'none';
+  }
+
+  function updateModelBadge() {
+    const badge = document.getElementById('ai-model-badge');
+    if (!badge) return;
+    const model = AiPrefs.get('model');
+    const short = model.length > 20 ? model.substring(0,20)+'…' : model;
+    badge.textContent = '⚡ ' + short;
+  }
+
+  // ── AI SETTINGS ───────────────────────────────────────────────────────────
+  window.openAiSettings = function() {
+    // Load current values into form
+    setVal('ais-apikey', AiPrefs.get('apiKey'));
+    document.getElementById('ais-model').value = AiPrefs.get('model');
+    const temp = AiPrefs.get('temperature');
+    document.getElementById('ais-temp').value = Math.round(temp*100);
+    document.getElementById('ais-temp-label').textContent = temp.toFixed(2);
+    const tokens = AiPrefs.get('maxTokens');
+    const step = Math.max(0, Math.min(31, Math.round(tokens/128)-1));
+    document.getElementById('ais-tokens').value = step;
+    document.getElementById('ais-tokens-label').textContent = (step+1)*128;
+    setVal('ais-prompt', AiPrefs.get('systemPrompt'));
+    document.getElementById('ais-test-result').style.display = 'none';
+    // mask key
+    document.getElementById('ais-apikey').type = 'password';
+    document.getElementById('ais-toggle-key').textContent = '👁';
+    openModal('modal-ai-settings');
+  };
+
+  window.saveAiSettings = function() {
+    const key    = val('ais-apikey');
+    const model  = document.getElementById('ais-model').value;
+    const temp   = parseInt(document.getElementById('ais-temp').value)/100;
+    const tokens = (parseInt(document.getElementById('ais-tokens').value)+1)*128;
+    const prompt = val('ais-prompt');
+    if(!key)   { showToast('API key cannot be empty','error'); return; }
+    if(!prompt){ showToast('System prompt cannot be empty','error'); return; }
+    AiPrefs.set('apiKey', key);
+    AiPrefs.set('model',  model);
+    AiPrefs.set('temperature', temp);
+    AiPrefs.set('maxTokens',   tokens);
+    AiPrefs.set('systemPrompt', prompt);
+    updateModelBadge();
+    showToast('AI settings saved ✓');
+    closeModal('modal-ai-settings');
+  };
+
+  window.resetAiDefaults = function() {
+    if(!confirm('Reset all AI settings to defaults?')) return;
+    AiPrefs.reset();
+    openAiSettings(); // reload form
+    showToast('Settings reset to defaults');
+  };
+
+  window.toggleKeyVisible = function() {
+    const el  = document.getElementById('ais-apikey');
+    const btn = document.getElementById('ais-toggle-key');
+    if(el.type==='password'){ el.type='text';  btn.textContent='🙈'; }
+    else                    { el.type='password'; btn.textContent='👁'; }
+  };
+
+  window.pasteApiKey = async function() {
+    try {
+      const text = await navigator.clipboard.readText();
+      setVal('ais-apikey', text.trim());
+      showToast('Key pasted from clipboard');
+    } catch(e) { showToast('Could not read clipboard','error'); }
+  };
+
+  window.clearApiKey = function() {
+    if(!confirm('Clear the saved API key?')) return;
+    setVal('ais-apikey','');
+    showToast('Key cleared');
+  };
+
+  window.testApiKey = async function() {
+    const key = val('ais-apikey');
+    if(!key){ showToast('Enter an API key first','error'); return; }
+    const btn = document.getElementById('ais-test-btn');
+    const result = document.getElementById('ais-test-result');
+    btn.disabled=true; btn.textContent='Testing…';
+    result.style.display='none';
+    try {
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+key.trim()},
+        body:JSON.stringify({model:AI_DEFAULTS.model,max_tokens:10,temperature:0.1,messages:[{role:'system',content:'You are a test assistant.'},{role:'user',content:'Reply with exactly: KEY_OK'}]})
+      });
+      const data=await res.json();
+      if(res.ok){
+        result.textContent='✓ Connection successful!';
+        result.className='test-result success';
+      } else {
+        result.textContent='✗ '+( data?.error?.message||res.status);
+        result.className='test-result error';
+      }
+    } catch(e) {
+      result.textContent='✗ Network error: '+e.message;
+      result.className='test-result error';
+    }
+    result.style.display='block';
+    btn.disabled=false; btn.textContent='Test Connection';
+  };
+
+  // Temperature + Tokens sliders
+  window.onTempChange = function(v) {
+    document.getElementById('ais-temp-label').textContent = (v/100).toFixed(2);
+  };
+  window.onTokensChange = function(v) {
+    document.getElementById('ais-tokens-label').textContent = ((parseInt(v)+1)*128);
+  };
+
+  // ── Quick-ask suggestions ─────────────────────────────────────────────────
+  window.askSuggestion = function(q) {
+    document.getElementById('aiInput').value = q;
+    sendAiMessage();
+  };
+
+  // ── Shared UI helpers ─────────────────────────────────────────────────────
+  function val(id)    { return (document.getElementById(id)||{}).value?.trim()||''; }
+  function num(id)    { return parseFloat(val(id))||0; }
+  function setVal(id,v){ const el=document.getElementById(id); if(el) el.value=v??''; }
+  function fillForm(fId,map){ Object.entries(map).forEach(([id,v])=>setVal(id,v)); }
+
+  function populateRoomSelect(id) {
+    const sel=document.getElementById(id); if(!sel) return;
+    const cur=sel.value;
+    sel.innerHTML='<option value="">— Select room —</option>'+rooms.map(r=>`<option value="${r.id}">${r.name}</option>`).join('');
+    if(cur) sel.value=cur;
+  }
+  function populateRoomFilter(id,data) {
+    const sel=document.getElementById(id); if(!sel) return;
+    const ids=[...new Set(data.map(x=>x.roomId).filter(Boolean))];
+    sel.innerHTML='<option value="">All rooms</option>'+ids.map(rid=>{ const room=rooms.find(r=>r.id===rid); return `<option value="${rid}">${room?room.name:rid}</option>`; }).join('');
+  }
+
+  function openModal(id) {
+    document.getElementById(id).style.display='flex';
+    const bp=document.getElementById('bill-preview'); if(bp) bp.style.display='none';
+    const sb=document.getElementById('saveBillBtn');  if(sb) sb.disabled=true;
+  }
+  function closeModal(id) {
+    document.getElementById(id).style.display='none';
+    editTarget=null;
+    document.querySelectorAll(`#${id} input:not([data-keep]),#${id} textarea:not([data-keep]),#${id} select:not([data-keep])`).forEach(el=>{
+      if(el.tagName==='SELECT') el.selectedIndex=0;
+      else if(el.type==='checkbox') el.checked=false;
+      else el.value='';
+    });
+    const bn=document.getElementById('bf-baseline-note'); if(bn) bn.textContent='';
+    const wi=document.getElementById('bf-waterInit'), pi=document.getElementById('bf-powerInit');
+    if(wi) wi.readOnly=false; if(pi) pi.readOnly=false;
+  }
+  function showToast(msg,type='success') {
+    const t=document.getElementById('toast');
+    t.textContent=msg; t.className='toast toast-'+type;
+    t.style.display='block';
+    setTimeout(()=>{ t.style.display='none'; },3000);
+  }
+
+  window.openModal=openModal; window.closeModal=closeModal;
+  window.saveRoom=saveRoom; window.saveTenant=saveTenant;
+  window.saveReading=saveReading; window.saveBill=saveBill;
+  window.saveComplaint=saveComplaint;
+  window.filterReadings=filterReadings; window.filterBills=filterBills;
+  window.filterComplaints=filterComplaints; window.calculateBill=calculateBill;
+  window.toggleSidebar = function(){ document.getElementById('sidebar').classList.toggle('open'); };
+  window.openNewModal = function(id) {
+    editTarget=null;
+    const titleMap={'modal-room':['room-form-title','Add Room'],'modal-tenant':['tenant-form-title','Add Tenant'],'modal-reading':['reading-form-title','Add Reading'],'modal-billing':['billing-form-title','Generate Bill'],'modal-complaint':['complaint-form-title','Log Entry']};
+    const [tid,ttxt]=titleMap[id]||[];
+    if(tid){ document.getElementById(tid).textContent=ttxt; }
+    openModal(id);
+  };
+</script>
+
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0F1117;--bg2:#161B27;--card:#1E2433;--border:#2A3144;--input:#1E2433;
+  --txt:#E2E8F0;--txt2:#8892A4;--dim:#5A6478;
+  --accent:#4F72FF;--accentD:#3A5CE0;
+  --green:#10B981;--amber:#F59E0B;--red:#EF4444;--purple:#8B5CF6;
+  --radius:10px;--sidebar:220px;
+}
+body{background:var(--bg);color:var(--txt);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
+
+/* ── Login ── */
+#loginScreen,#onboardScreen{display:flex;align-items:center;justify-content:center;min-height:100vh;background:var(--bg)}
+
+/* Public slip page */
+#slipScreen{align-items:center;justify-content:center;min-height:100vh;background:var(--bg);padding:24px}
+.slip-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:32px;width:100%;max-width:480px}
+.slip-loading{text-align:center;color:var(--txt2);padding:40px 0}
+.slip-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--border)}
+.slip-brand{font-size:19px;font-weight:700}
+.slip-sub{color:var(--txt2);font-size:12.5px;margin-top:2px}
+.slip-meta{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;margin-bottom:20px}
+.slip-meta div{display:flex;flex-direction:column;gap:2px}
+.slip-meta span{font-size:11px;color:var(--txt2)}
+.slip-meta b{font-size:13.5px}
+.slip-table{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:16px}
+.slip-table th{text-align:left;color:var(--txt2);font-weight:600;font-size:11px;padding:6px 4px;border-bottom:1px solid var(--border)}
+.slip-table td{padding:8px 4px;border-bottom:1px solid var(--border)}
+.slip-total{display:flex;justify-content:space-between;align-items:center;padding:14px 0;font-size:15px;font-weight:700;border-top:1px solid var(--border)}
+.slip-note{color:var(--txt2);font-size:12px;margin:4px 0 16px}
+.slip-actions{display:flex;gap:10px;margin-top:8px}
+.slip-actions .btn-primary,.slip-actions .btn-secondary{flex:1;padding:11px;text-align:center}
+.slip-footer{text-align:center;color:var(--txt2);font-size:11px;margin-top:18px}
+@media print{
+  body *{visibility:hidden}
+  .slip-box,.slip-box *{visibility:visible}
+  .slip-box{position:absolute;top:0;left:0;width:100%;border:none;padding:0}
+  .slip-actions{display:none}
+}
+.login-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:40px 36px;width:360px;text-align:center}
+.login-logo{font-size:38px;margin-bottom:8px}.login-brand{font-size:22px;font-weight:700;letter-spacing:-.5px}.login-sub{color:var(--txt);font-size:15px;font-weight:600;margin-top:4px}
+.login-sub2{color:var(--txt2);font-size:13px;margin:6px 0 24px;line-height:1.5}
+.login-box input{width:100%;padding:11px 14px;background:var(--input);border:1px solid var(--border);border-radius:var(--radius);color:var(--txt);font-size:15px;margin-bottom:12px;text-align:left}
+.login-box input:focus{outline:none;border-color:var(--accent)}
+.btn-login{width:100%;padding:12px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);font-size:15px;font-weight:600;cursor:pointer;transition:background .15s}
+.btn-login:hover{background:var(--accentD)}
+.btn-google{width:100%;padding:11px;background:#fff;color:#3c4043;border:1px solid var(--border);border-radius:var(--radius);font-size:14px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:18px}
+.btn-google:hover{background:#f5f5f5}
+.auth-divider{display:flex;align-items:center;gap:10px;color:var(--txt2);font-size:11px;margin-bottom:18px}
+.auth-divider::before,.auth-divider::after{content:'';flex:1;height:1px;background:var(--border)}
+#authError{color:var(--red);font-size:13px;margin-top:2px;margin-bottom:6px;display:none}
+.auth-link{display:block;color:var(--accent);font-size:13px;margin-top:10px;text-decoration:none}
+.auth-link:hover{text-decoration:underline}
+.auth-switch{font-weight:600}
+.sidebar-account{color:var(--txt2);font-size:11px;padding:0 20px 10px;word-break:break-all}
+
+/* ── Shell ── */
+#appShell{display:flex;min-height:100vh}
+
+/* ── Sidebar ── */
+#sidebar{width:var(--sidebar);background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:0;left:0;height:100vh;z-index:100;transition:transform .25s}
+.sidebar-brand{padding:22px 20px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.brand-icon{font-size:22px}.brand-name{font-size:17px;font-weight:700;letter-spacing:-.3px}
+.nav-list{list-style:none;padding:12px 0;flex:1;overflow-y:auto}
+.nav-list a{display:flex;align-items:center;gap:10px;padding:10px 20px;color:var(--txt2);text-decoration:none;transition:all .15s;font-size:14px}
+.nav-list a:hover{color:var(--txt);background:rgba(79,114,255,.08)}
+.nav-list a.active{color:var(--accent);background:rgba(79,114,255,.12);font-weight:600}
+.nav-icon{font-size:16px;width:20px;text-align:center}
+.sidebar-footer{padding:16px 20px;border-top:1px solid var(--border)}
+.btn-logout{width:100%;padding:9px;background:transparent;border:1px solid var(--border);color:var(--txt2);border-radius:var(--radius);cursor:pointer;font-size:13px;transition:all .15s}
+.btn-logout:hover{border-color:var(--red);color:var(--red)}
+
+/* ── Main ── */
+#mainContent{margin-left:var(--sidebar);flex:1;display:flex;flex-direction:column;min-height:100vh}
+.topbar{background:var(--bg2);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
+.topbar-title{font-size:16px;font-weight:600}.hamburger{display:none;background:none;border:none;color:var(--txt2);font-size:20px;cursor:pointer;padding:4px}
+.page-content{padding:24px;flex:1}
+
+/* ── Page header ── */
+.page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:10px}
+.page-title{font-size:20px;font-weight:700}
+.page-loader{display:flex;align-items:center;justify-content:center;padding:60px;color:var(--txt2);font-size:13px}
+.spinner{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;margin-right:10px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── Dashboard ── */
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;margin-bottom:28px}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:18px 16px}
+.stat-label{color:var(--txt2);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+.stat-value{font-size:26px;font-weight:700;line-height:1}
+.stat-value.accent{color:var(--accent)}.stat-value.green{color:var(--green)}.stat-value.amber{color:var(--amber)}.stat-value.red{color:var(--red)}.stat-value.dim{color:var(--txt2)}
+.dash-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.dash-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:18px}
+.dash-card-title{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--txt2);margin-bottom:14px;font-weight:600}
+#pending-list,#complaints-preview{list-style:none}
+.pending-item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px}
+.pending-item:last-child{border-bottom:none}
+.pi-room{flex:1;color:var(--txt)}.pi-month{color:var(--txt2);font-size:12px;margin-left:6px}.pi-amt{color:var(--amber);font-weight:600}
+.comp-subject{color:var(--txt2);font-size:12px;flex:1}
+.empty-item{color:var(--dim);font-size:13px;padding:12px 0;text-align:center}
+
+/* ── Rooms ── */
+#rooms-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.room-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:18px;display:flex;flex-direction:column;gap:10px;cursor:pointer;transition:border-color .15s}
+.room-card:hover{border-color:var(--accent)}
+.room-detail-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px;flex-wrap:wrap}
+.checkbox-row{display:flex;align-items:flex-start;gap:8px;font-size:12.5px;color:var(--txt2);line-height:1.5;margin-top:4px}
+.checkbox-row input{width:auto;margin:2px 0 0}
+.baseline-note{font-size:12px;color:var(--txt2);background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;margin:-4px 0 4px;display:none}
+.baseline-note:not(:empty){display:block}
+.room-card-header{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.room-name{font-size:16px;font-weight:700}
+.room-meta{color:var(--txt2);font-size:12px;display:flex;gap:10px;flex-wrap:wrap}
+.room-rates{display:flex;gap:8px;flex-wrap:wrap}
+.rate-pill{background:rgba(79,114,255,.1);border:1px solid rgba(79,114,255,.2);color:var(--accent);border-radius:20px;padding:3px 10px;font-size:12px}
+.room-notes{font-size:12px;color:var(--txt2);font-style:italic}
+
+/* ── Table ── */
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th{background:var(--bg2);color:var(--txt2);font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:10px 14px;text-align:left;border-bottom:1px solid var(--border);font-weight:600}
+td{padding:10px 14px;border-bottom:1px solid var(--border);color:var(--txt);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(255,255,255,.02)}
+.empty-td{text-align:center;color:var(--dim);padding:40px 14px}
+.num-cell{text-align:right;font-variant-numeric:tabular-nums}
+.total-cell{color:var(--amber);font-weight:600}
+.td-actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
+.row-paid td{opacity:.55}
+.text-dim{color:var(--dim)}
+
+/* ── Complaints ── */
+#complaints-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.complaint-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;flex-direction:column;gap:8px}
+.complaint-card.type-maintenance{border-left:3px solid var(--amber)}
+.complaint-card.type-complaint{border-left:3px solid var(--red)}
+.complaint-card.type-compliment{border-left:3px solid var(--green)}
+.complaint-card.type-note{border-left:3px solid var(--accent)}
+.complaint-header{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.comp-date{margin-left:auto;color:var(--dim);font-size:11px}
+.comp-room{font-size:13px;font-weight:600;color:var(--txt2)}
+.comp-subject{font-size:14px;font-weight:600}
+.comp-body{font-size:13px;color:var(--txt2);line-height:1.5}
+.comp-type-badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;font-weight:700;padding:2px 8px;border-radius:20px}
+
+/* ── Status badges ── */
+.status-badge{font-size:11px;padding:2px 8px;border-radius:20px;font-weight:600;text-transform:capitalize}
+.status-occupied{background:rgba(16,185,129,.15);color:var(--green)}
+.status-vacant{background:rgba(79,114,255,.15);color:var(--accent)}
+.status-maintenance{background:rgba(245,158,11,.15);color:var(--amber)}
+.status-paid{background:rgba(16,185,129,.15);color:var(--green)}
+.status-partial{background:rgba(245,158,11,.15);color:var(--amber)}
+.status-unpaid{background:rgba(239,68,68,.15);color:var(--red)}
+.status-open{background:rgba(239,68,68,.15);color:var(--red)}
+.status-in-progress{background:rgba(245,158,11,.15);color:var(--amber)}
+.status-resolved{background:rgba(16,185,129,.15);color:var(--green)}
+.tag-complaint{background:rgba(239,68,68,.15);color:var(--red)}
+.tag-maintenance{background:rgba(245,158,11,.15);color:var(--amber)}
+.tag-compliment{background:rgba(16,185,129,.15);color:var(--green)}
+.tag-note{background:rgba(79,114,255,.15);color:var(--accent)}
+
+/* ── Buttons ── */
+.btn-primary{padding:9px 18px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);font-size:14px;font-weight:600;cursor:pointer;transition:background .15s;white-space:nowrap}
+.btn-primary:hover{background:var(--accentD)}
+.btn-sm{padding:6px 12px;font-size:12px;border-radius:6px;cursor:pointer;font-weight:500;border:1px solid;transition:all .15s}
+.btn-xs{padding:4px 9px;font-size:11px;border-radius:5px;cursor:pointer;font-weight:500;border:1px solid;transition:all .15s}
+.btn-secondary{background:transparent;border-color:var(--border);color:var(--txt2)}
+.btn-secondary:hover{border-color:var(--accent);color:var(--accent)}
+.btn-danger{background:transparent;border-color:var(--red);color:var(--red)}
+.btn-danger:hover{background:rgba(239,68,68,.1)}
+.btn-green{background:transparent;border-color:var(--green);color:var(--green)}
+.btn-green:hover{background:var(--green);color:#fff}
+.btn-sms{background:transparent;border-color:var(--accent);color:var(--accent)}
+.btn-sms:hover{background:var(--accent);color:#fff}
+.btn-whatsapp{background:transparent;border-color:#25D366;color:#25D366}
+.btn-whatsapp:hover{background:#25D366;color:#0B0D13}
+.field-label{display:block;font-size:11.5px;color:var(--txt2);text-align:left;margin:2px 0 6px}
+.sidebar-footer-row{display:flex;gap:8px}
+.sidebar-footer-row .btn-secondary{flex:0 0 auto}
+.sidebar-footer-row .btn-logout{flex:1}
+.btn-icon{background:transparent;border:1px solid var(--border);color:var(--txt2);padding:6px 10px;border-radius:6px;cursor:pointer;font-size:14px;transition:all .15s}
+.btn-icon:hover{border-color:var(--accent);color:var(--accent)}
+.card-actions{display:flex;gap:8px;margin-top:auto}
+.filter-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;align-items:center}
+.filter-row select,.filter-row input{padding:7px 12px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);color:var(--txt);font-size:13px}
+.filter-row select:focus,.filter-row input:focus{outline:none;border-color:var(--accent)}
+
+/* ── Modals ── */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);align-items:center;justify-content:center;z-index:200;padding:16px}
+.modal-box{background:var(--card);border:1px solid var(--border);border-radius:14px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;display:flex;flex-direction:column}
+.modal-header{padding:18px 22px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.modal-title{font-size:16px;font-weight:700}
+.modal-close{background:none;border:none;color:var(--txt2);font-size:20px;cursor:pointer;line-height:1}
+.modal-close:hover{color:var(--txt)}
+.modal-body{padding:20px 22px;display:flex;flex-direction:column;gap:14px}
+.modal-footer{padding:14px 22px;border-top:1px solid var(--border);display:flex;gap:10px;justify-content:flex-end}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.form-group{display:flex;flex-direction:column;gap:5px}
+.form-group label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--txt2);font-weight:600}
+.form-group input,.form-group select,.form-group textarea{padding:9px 12px;background:var(--input);border:1px solid var(--border);border-radius:var(--radius);color:var(--txt);font-size:14px}
+.form-group input:focus,.form-group select:focus,.form-group textarea:focus{outline:none;border-color:var(--accent)}
+.form-group textarea{resize:vertical;min-height:80px;font-family:inherit}
+.form-group select option{background:var(--card)}
+.full{grid-column:1/-1}
+#bill-preview{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;font-size:13px;line-height:1.7;display:none}
+#bp-total{font-size:15px;font-weight:700;color:var(--amber);margin-top:4px}
+
+/* ── AI Page ── */
+#page-ai{display:flex;flex-direction:column;height:calc(100vh - 58px)}
+.ai-layout{display:flex;gap:0;flex:1;overflow:hidden}
+.ai-sidebar{width:260px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;overflow-y:auto}
+.ai-sidebar-section{padding:16px}
+.ai-sidebar-title{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);font-weight:600;margin-bottom:10px}
+.ai-model-badge{background:rgba(79,114,255,.12);border:1px solid rgba(79,114,255,.25);color:var(--accent);border-radius:20px;padding:4px 12px;font-size:12px;font-weight:600;display:inline-block;margin-bottom:12px}
+.ai-actions{display:flex;flex-direction:column;gap:8px}
+.ai-actions button{text-align:left;padding:8px 12px;font-size:13px}
+.ai-divider{height:1px;background:var(--border);margin:4px 0}
+.suggestion-title{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);font-weight:600;margin-bottom:8px;padding:16px 16px 0}
+.suggestion-list{padding:0 16px 16px;display:flex;flex-direction:column;gap:6px}
+.suggestion-chip{background:rgba(79,114,255,.07);border:1px solid rgba(79,114,255,.18);color:var(--txt2);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer;text-align:left;transition:all .15s;line-height:1.4}
+.suggestion-chip:hover{background:rgba(79,114,255,.15);color:var(--txt);border-color:var(--accent)}
+
+.ai-main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.ai-chat-area{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px}
+#ai-messages{display:flex;flex-direction:column;gap:14px}
+.chat-bubble{max-width:78%;padding:12px 16px;border-radius:12px;font-size:14px;line-height:1.6;word-break:break-word}
+.ai-bubble{background:var(--card);border:1px solid var(--border);border-radius:12px 12px 12px 2px;color:var(--txt);align-self:flex-start}
+.user-bubble{background:var(--accent);color:#fff;border-radius:12px 12px 2px 12px;align-self:flex-end}
+#ai-thinking{display:none;align-items:center;gap:10px;color:var(--txt2);font-size:13px;font-style:italic;padding:4px 0}
+.thinking-dots span{display:inline-block;width:6px;height:6px;background:var(--accent);border-radius:50%;animation:bounce .9s ease-in-out infinite}
+.thinking-dots span:nth-child(2){animation-delay:.15s}
+.thinking-dots span:nth-child(3){animation-delay:.3s}
+@keyframes bounce{0%,80%,100%{transform:translateY(0)}40%{transform:translateY(-6px)}}
+
+.ai-input-bar{padding:14px 20px;border-top:1px solid var(--border);background:var(--bg2);display:flex;gap:10px;align-items:flex-end}
+#aiInput{flex:1;padding:10px 14px;background:var(--input);border:1px solid var(--border);border-radius:var(--radius);color:var(--txt);font-size:14px;resize:none;font-family:inherit;max-height:120px;overflow-y:auto}
+#aiInput:focus{outline:none;border-color:var(--accent)}
+#ai-send-btn{padding:10px 18px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);font-size:14px;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;flex-shrink:0}
+#ai-send-btn:hover{background:var(--accentD)}
+#ai-send-btn:disabled{opacity:.5;cursor:not-allowed}
+.ai-scope-note{font-size:11px;color:var(--dim);text-align:center;padding:6px 20px}
+
+/* ── AI Settings Modal ── */
+.settings-section{border:1px solid var(--border);border-radius:var(--radius);padding:14px;display:flex;flex-direction:column;gap:10px}
+.settings-section-title{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);font-weight:600;margin-bottom:2px}
+.key-row{display:flex;gap:6px;align-items:center}
+.key-row input{flex:1}
+.slider-row{display:flex;align-items:center;gap:10px}
+.slider-row input[type=range]{flex:1;accent-color:var(--accent)}
+.slider-val{min-width:38px;text-align:right;color:var(--accent);font-weight:600;font-size:13px}
+.test-result{padding:8px 12px;border-radius:6px;font-size:13px;margin-top:4px;display:none}
+.test-result.success{background:rgba(16,185,129,.12);color:var(--green);border:1px solid rgba(16,185,129,.3)}
+.test-result.error{background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.3)}
+
+/* ── Empty state ── */
+.empty-state{text-align:center;padding:60px 20px;color:var(--txt2);grid-column:1/-1}
+.empty-icon{font-size:40px;margin-bottom:12px}
+
+/* ── Toast ── */
+#toast{position:fixed;bottom:24px;right:24px;display:none;padding:12px 20px;border-radius:var(--radius);font-size:14px;z-index:999;max-width:320px}
+.toast-success{background:var(--green);color:#fff}
+.toast-error{background:var(--red);color:#fff}
+
+/* ── Responsive ── */
+@media(max-width:768px){
+  #sidebar{transform:translateX(-100%)}
+  #sidebar.open{transform:translateX(0);box-shadow:4px 0 20px rgba(0,0,0,.4)}
+  #mainContent{margin-left:0}
+  .hamburger{display:block}
+  .form-row{grid-template-columns:1fr}
+  .dash-grid{grid-template-columns:1fr}
+  .stat-grid{grid-template-columns:repeat(2,1fr)}
+  .ai-sidebar{display:none}
+  .ai-layout{flex-direction:column}
+  #page-ai{height:auto}
+  .ai-chat-area{min-height:50vh}
+}
+</style>
+</head>
+<body>
+
+<!-- Auth (sign in / create account) -->
+<div id="loginScreen">
+  <div class="login-box">
+    <div class="login-logo">🏠</div>
+    <div class="login-brand">RentReview</div>
+    <div class="login-sub" id="authTitle">Welcome back</div>
+    <div class="login-sub2" id="authSub">Sign in to manage your building</div>
+
+    <button class="btn-google" id="authGoogleBtn" type="button">
+      <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.81.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.94v2.33A9 9 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.97 10.72A5.4 5.4 0 0 1 3.68 9c0-.6.1-1.18.29-1.72V4.95H.94A9 9 0 0 0 0 9c0 1.45.35 2.83.94 4.05l3.03-2.33z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.51.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0A9 9 0 0 0 .94 4.95l3.03 2.33C4.68 5.16 6.66 3.58 9 3.58z"/></svg>
+      Continue with Google
+    </button>
+    <div class="auth-divider"><span>or</span></div>
+
+    <input type="email" id="authEmail" placeholder="Email address" autocomplete="email"/>
+    <input type="password" id="authPass" placeholder="Password" autocomplete="current-password"/>
+    <button class="btn-login" id="authEmailBtn">Sign In</button>
+    <div id="authError"></div>
+    <a href="#" id="authForgotLink" class="auth-link">Forgot password?</a>
+    <a href="#" id="authSwitchLink" class="auth-link auth-switch">New here? Create an account</a>
+  </div>
+</div>
+
+<!-- Onboarding: first-time setup — name your building -->
+<div id="onboardScreen" style="display:none">
+  <div class="login-box">
+    <div class="login-logo">🏢</div>
+    <div class="login-brand">Set up your ledger</div>
+    <div class="login-sub2">Give your building a name — you'll see it on your dashboard and on every tenant PDF slip.</div>
+    <input type="text" id="onbName" placeholder="e.g. Sunrise Apartments"/>
+    <label class="field-label">Country dialing code (used to auto-format tenant phone numbers for SMS/WhatsApp)</label>
+    <input type="text" id="onbCountryCode" placeholder="e.g. 254 for Kenya, 234 for Nigeria" value="254"/>
+    <button class="btn-login" id="onbBtn">Continue</button>
+  </div>
+</div>
+
+<!-- Public slip page: reached via ?slip=<id>, no sign-in, content injected by JS -->
+<div id="slipScreen" style="display:none"></div>
+
+<!-- App -->
+<div id="appShell" style="display:none">
+  <nav id="sidebar">
+    <div class="sidebar-brand"><span class="brand-icon">🏠</span><span class="brand-name">RentReview</span></div>
+    <ul class="nav-list">
+      <li><a href="#" data-nav="dashboard"><span class="nav-icon">📊</span>Dashboard</a></li>
+      <li><a href="#" data-nav="rooms"><span class="nav-icon">🚪</span>Rooms</a></li>
+      <li><a href="#" data-nav="tenants"><span class="nav-icon">👤</span>Tenants</a></li>
+      <li><a href="#" data-nav="readings"><span class="nav-icon">🔢</span>Readings</a></li>
+      <li><a href="#" data-nav="billing"><span class="nav-icon">🧾</span>Billing</a></li>
+      <li><a href="#" data-nav="complaints"><span class="nav-icon">📋</span>Complaints</a></li>
+      <li><a href="#" data-nav="ai"><span class="nav-icon">🤖</span>AI Assistant</a></li>
+    </ul>
+    <div class="sidebar-footer">
+      <div class="sidebar-account" id="topbar-account-email"></div>
+      <div class="sidebar-footer-row">
+        <button class="btn-secondary btn-sm" onclick="openSettings()">⚙ Settings</button>
+        <button class="btn-logout" id="logoutBtn">Sign Out</button>
+      </div>
+    </div>
+  </nav>
+
+  <div id="mainContent">
+    <div class="topbar">
+      <button class="hamburger" onclick="toggleSidebar()">☰</button>
+      <span class="topbar-title" id="topbar-title">Dashboard</span>
+      <span></span>
+    </div>
+
+    <div class="page-content">
+
+      <!-- DASHBOARD -->
+      <div class="page" id="page-dashboard">
+        <div class="page-loader"><div class="spinner"></div>Loading…</div>
+        <div class="page-header"><h1 class="page-title">Dashboard</h1></div>
+        <div class="stat-grid">
+          <div class="stat-card"><div class="stat-label">Total Rooms</div><div class="stat-value accent" id="stat-rooms">—</div></div>
+          <div class="stat-card"><div class="stat-label">Occupied</div><div class="stat-value green" id="stat-occupied">—</div></div>
+          <div class="stat-card"><div class="stat-label">Vacant</div><div class="stat-value" id="stat-vacant">—</div></div>
+          <div class="stat-card"><div class="stat-label">Maintenance</div><div class="stat-value amber" id="stat-maintenance">—</div></div>
+          <div class="stat-card"><div class="stat-label">Paid Revenue</div><div class="stat-value green" id="stat-revenue" style="font-size:16px">—</div></div>
+          <div class="stat-card"><div class="stat-label">Unpaid Bills</div><div class="stat-value red" id="stat-pending-count">—</div></div>
+          <div class="stat-card"><div class="stat-label">Open Issues</div><div class="stat-value amber" id="stat-complaints">—</div></div>
+          <div class="stat-card"><div class="stat-label">Tenants</div><div class="stat-value dim" id="stat-tenants">—</div></div>
+        </div>
+        <div class="dash-grid">
+          <div class="dash-card"><div class="dash-card-title">Pending Payments</div><ul id="pending-list"></ul></div>
+          <div class="dash-card"><div class="dash-card-title">Open Issues</div><ul id="complaints-preview"></ul></div>
+        </div>
+      </div>
+
+      <!-- ROOMS -->
+      <div class="page" id="page-rooms" style="display:none">
+        <div class="page-loader"><div class="spinner"></div>Loading…</div>
+        <div class="page-header"><h1 class="page-title">Rooms</h1><button class="btn-primary" onclick="openNewModal('modal-room')">+ Add Room</button></div>
+        <div id="rooms-grid"></div>
+      </div>
+
+      <!-- ROOM DETAIL (each room's own independent environment/history) -->
+      <div class="page" id="page-room-detail" style="display:none">
+        <div class="page-loader"><div class="spinner"></div>Loading…</div>
+        <div id="room-detail-content"></div>
+      </div>
+
+      <!-- TENANTS -->
+      <div class="page" id="page-tenants" style="display:none">
+        <div class="page-loader"><div class="spinner"></div>Loading…</div>
+        <div class="page-header"><h1 class="page-title">Tenants</h1><button class="btn-primary" onclick="openNewModal('modal-tenant')">+ Add Tenant</button></div>
+        <div class="table-wrap">
+          <table><thead><tr><th>Name / ID</th><th>Room</th><th>Phone</th><th>Email</th><th>Move-in</th><th>Lease End</th><th></th></tr></thead>
+          <tbody id="tenants-tbody"></tbody></table>
+        </div>
+      </div>
+
+      <!-- READINGS -->
+      <div class="page" id="page-readings" style="display:none">
+        <div class="page-loader"><div class="spinner"></div>Loading…</div>
+        <div class="page-header"><h1 class="page-title">Meter Readings</h1><button class="btn-primary" onclick="openNewModal('modal-reading')">+ Add Reading</button></div>
+        <div class="filter-row"><select id="readings-room-filter" onchange="filterReadings()"></select></div>
+        <div class="table-wrap">
+          <table><thead><tr><th>Date</th><th>Room</th><th>Water</th><th>Power</th><th>Rent Status</th><th>Amount Paid</th><th></th></tr></thead>
+          <tbody id="readings-tbody"></tbody></table>
+        </div>
+      </div>
+
+      <!-- BILLING -->
+      <div class="page" id="page-billing" style="display:none">
+        <div class="page-loader"><div class="spinner"></div>Loading…</div>
+        <div class="page-header"><h1 class="page-title">Billing</h1><button class="btn-primary" onclick="openNewModal('modal-billing')">+ Generate Bill</button></div>
+        <div class="filter-row"><select id="bills-room-filter" onchange="filterBills()"></select></div>
+        <div class="table-wrap">
+          <table><thead><tr><th>Month</th><th>Room</th><th>Water</th><th>Power</th><th>Rent</th><th>Total</th><th></th></tr></thead>
+          <tbody id="bills-tbody"></tbody></table>
+        </div>
+      </div>
+
+      <!-- COMPLAINTS -->
+      <div class="page" id="page-complaints" style="display:none">
+        <div class="page-loader"><div class="spinner"></div>Loading…</div>
+        <div class="page-header"><h1 class="page-title">Complaints & Notes</h1><button class="btn-primary" onclick="openNewModal('modal-complaint')">+ Log Entry</button></div>
+        <div class="filter-row">
+          <select id="complaints-room-filter" onchange="filterComplaints()"></select>
+          <select id="complaints-status-filter" onchange="filterComplaints()">
+            <option value="">All statuses</option><option value="open">Open</option>
+            <option value="in-progress">In Progress</option><option value="resolved">Resolved</option>
+          </select>
+        </div>
+        <div id="complaints-grid"></div>
+      </div>
+
+      <!-- AI ASSISTANT -->
+      <div class="page" id="page-ai" style="display:none">
+        <div class="page-loader"><div class="spinner"></div>Loading…</div>
+        <div class="ai-layout">
+
+          <!-- AI Sidebar -->
+          <div class="ai-sidebar">
+            <div class="ai-sidebar-section">
+              <div class="ai-sidebar-title">Active Model</div>
+              <div class="ai-model-badge" id="ai-model-badge">⚡ llama-3.3-70b-versatile</div>
+              <div class="ai-actions">
+                <button class="btn-sm btn-secondary" onclick="openAiSettings()">⚙ AI Settings</button>
+                <button class="btn-sm btn-secondary" onclick="refreshAiData()">♻ Refresh Data</button>
+                <button class="btn-sm btn-secondary" onclick="clearAiChat()">🗑 Clear Chat</button>
+              </div>
+            </div>
+            <div class="ai-divider"></div>
+            <div class="suggestion-title">Quick Questions</div>
+            <div class="suggestion-list">
+              <button class="suggestion-chip" onclick="askSuggestion('Which rooms are currently vacant?')">Which rooms are currently vacant?</button>
+              <button class="suggestion-chip" onclick="askSuggestion('Show me all unpaid bills and the total outstanding amount.')">Total outstanding bills?</button>
+              <button class="suggestion-chip" onclick="askSuggestion('Which tenants have leases ending in the next 3 months?')">Leases expiring soon?</button>
+              <button class="suggestion-chip" onclick="askSuggestion('Summarise all open complaints and maintenance requests.')">Open complaints summary</button>
+              <button class="suggestion-chip" onclick="askSuggestion('What is the total collected revenue so far?')">Total collected revenue?</button>
+              <button class="suggestion-chip" onclick="askSuggestion('Which room has the highest monthly rent?')">Highest rent room?</button>
+              <button class="suggestion-chip" onclick="askSuggestion('List all tenants with their assigned rooms and contact details.')">All tenants list</button>
+              <button class="suggestion-chip" onclick="askSuggestion('Are there any tenants with partial or unpaid rent status in the readings?')">Rent payment issues?</button>
+            </div>
+          </div>
+
+          <!-- Chat -->
+          <div class="ai-main">
+            <div class="ai-chat-area">
+              <div id="ai-messages"></div>
+              <div id="ai-thinking">
+                <div class="thinking-dots"><span></span><span></span><span></span></div>
+                Analysing your property data…
+              </div>
+            </div>
+            <div class="ai-scope-note">Powered by your live Firestore data · Groq AI · Fully private</div>
+            <div class="ai-input-bar">
+              <textarea id="aiInput" placeholder="Ask anything about your property…" rows="1"></textarea>
+              <button id="ai-send-btn" onclick="sendAiMessage()">Send ↑</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+    </div><!-- /page-content -->
+  </div><!-- /mainContent -->
+</div><!-- /appShell -->
+
+<!-- ════ MODALS ════ -->
+
+<!-- Settings -->
+<div class="modal-overlay" id="modal-settings" onclick="if(event.target===this)closeModal('modal-settings')">
+  <div class="modal-box">
+    <div class="modal-header"><span class="modal-title">Account Settings</span><button class="modal-close" onclick="closeModal('modal-settings')">×</button></div>
+    <div class="modal-body">
+      <div class="form-group full"><label>Building Name</label><input id="setName" placeholder="e.g. Sunrise Apartments"/></div>
+      <div class="form-group full"><label>Country Dialing Code</label><input id="setCountryCode" placeholder="e.g. 254"/>
+        <div class="baseline-note" style="display:block;margin-top:6px">Used to auto-format tenant phone numbers (e.g. "0722…" → "254722…") when sending SMS or WhatsApp slips. Only change this if your tenants' numbers aren't in this country.</div>
+      </div>
+    </div>
+    <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('modal-settings')">Cancel</button><button class="btn-primary" onclick="saveSettings()">Save</button></div>
+  </div>
+</div>
+
+<!-- Room -->
+<div class="modal-overlay" id="modal-room" onclick="if(event.target===this)closeModal('modal-room')">
+  <div class="modal-box">
+    <div class="modal-header"><span class="modal-title" id="room-form-title">Add Room</span><button class="modal-close" onclick="closeModal('modal-room')">×</button></div>
+    <div class="modal-body" id="room-form">
+      <div class="form-row">
+        <div class="form-group"><label>Room Name *</label><input id="rf-name" placeholder="e.g. A1"/></div>
+        <div class="form-group"><label>Floor</label><input id="rf-floor" placeholder="e.g. Ground"/></div>
+      </div>
+      <div class="form-group full"><label>Description</label><input id="rf-desc" placeholder="Studio, bedsitter…"/></div>
+      <div class="form-row">
+        <div class="form-group"><label>Monthly Rent (KES)</label><input id="rf-rent" type="number" placeholder="0"/></div>
+        <div class="form-group"><label>Status</label><select id="rf-status"><option value="vacant">Vacant</option><option value="occupied">Occupied</option><option value="maintenance">Maintenance</option></select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Water Rate (per unit)</label><input id="rf-waterRate" type="number" placeholder="0"/></div>
+        <div class="form-group"><label>Power Rate (per kWh)</label><input id="rf-powerRate" type="number" placeholder="0"/></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Initial Water Reading</label><input id="rf-initWater" type="number" placeholder="0"/></div>
+        <div class="form-group"><label>Initial Power Reading</label><input id="rf-initPower" type="number" placeholder="0"/></div>
+      </div>
+      <div class="form-group full"><label>Payment Notes</label><input id="rf-paymentDesc" placeholder="e.g. Pay by 5th of each month"/></div>
+      <label class="checkbox-row"><input type="checkbox" id="rf-meterReplaced"/> 🔧 Meter replaced — reset the baseline to the Initial Readings above (use this only when the physical water/power meter was swapped for a new one)</label>
+    </div>
+    <div class="modal-footer"><button class="btn-sm btn-secondary" onclick="closeModal('modal-room')">Cancel</button><button class="btn-primary" onclick="saveRoom()">Save Room</button></div>
+  </div>
+</div>
+
+<!-- Tenant -->
+<div class="modal-overlay" id="modal-tenant" onclick="if(event.target===this)closeModal('modal-tenant')">
+  <div class="modal-box">
+    <div class="modal-header"><span class="modal-title" id="tenant-form-title">Add Tenant</span><button class="modal-close" onclick="closeModal('modal-tenant')">×</button></div>
+    <div class="modal-body" id="tenant-form">
+      <div class="form-row">
+        <div class="form-group"><label>Full Name *</label><input id="tf-name"/></div>
+        <div class="form-group"><label>ID / Passport No.</label><input id="tf-idNum"/></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Phone</label><input id="tf-phone" type="tel"/></div>
+        <div class="form-group"><label>Email</label><input id="tf-email" type="email"/></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Gender</label><select id="tf-gender"><option value="">—</option><option value="male">Male</option><option value="female">Female</option><option value="other">Other</option></select></div>
+        <div class="form-group"><label>Occupants</label><input id="tf-occupants" type="number" value="1" min="1"/></div>
+      </div>
+      <div class="form-group full"><label>Assign Room</label><select id="tf-roomId"></select></div>
+      <div class="form-row">
+        <div class="form-group"><label>Move-in Date</label><input id="tf-moveIn" type="date"/></div>
+        <div class="form-group"><label>Lease End</label><input id="tf-leaseEnd" type="date"/></div>
+      </div>
+      <div class="form-group"><label>Deposit (KES)</label><input id="tf-deposit" type="number" placeholder="0"/></div>
+      <div class="form-group full"><label>Notes</label><textarea id="tf-notes" rows="2"></textarea></div>
+    </div>
+    <div class="modal-footer"><button class="btn-sm btn-secondary" onclick="closeModal('modal-tenant')">Cancel</button><button class="btn-primary" onclick="saveTenant()">Save Tenant</button></div>
+  </div>
+</div>
+
+<!-- Reading -->
+<div class="modal-overlay" id="modal-reading" onclick="if(event.target===this)closeModal('modal-reading')">
+  <div class="modal-box">
+    <div class="modal-header"><span class="modal-title" id="reading-form-title">Add Reading</span><button class="modal-close" onclick="closeModal('modal-reading')">×</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>Room *</label><select id="rdf-roomId"></select></div>
+        <div class="form-group"><label>Date *</label><input id="rdf-date" type="date"/></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>💧 Water Reading</label><input id="rdf-water" type="number" placeholder="0"/></div>
+        <div class="form-group"><label>⚡ Power Reading</label><input id="rdf-power" type="number" placeholder="0"/></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Rent Status</label><select id="rdf-rentStatus"><option value="paid">Paid</option><option value="partial">Partial</option><option value="unpaid">Unpaid</option></select></div>
+        <div class="form-group"><label>Amount Paid (KES)</label><input id="rdf-amountPaid" type="number" placeholder="0"/></div>
+      </div>
+      <div class="form-group full"><label>Notes</label><textarea id="rdf-notes" rows="2"></textarea></div>
+    </div>
+    <div class="modal-footer"><button class="btn-sm btn-secondary" onclick="closeModal('modal-reading')">Cancel</button><button class="btn-primary" onclick="saveReading()">Save Reading</button></div>
+  </div>
+</div>
+
+<!-- Billing -->
+<div class="modal-overlay" id="modal-billing" onclick="if(event.target===this)closeModal('modal-billing')">
+  <div class="modal-box">
+    <div class="modal-header"><span class="modal-title" id="billing-form-title">Generate Bill</span><button class="modal-close" onclick="closeModal('modal-billing')">×</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>Room *</label><select id="bf-roomId"></select></div>
+        <div class="form-group"><label>Month *</label><input id="bf-month" type="month"/></div>
+      </div>
+      <div class="form-group"><label>Base Rent (KES)</label><input id="bf-baseRent" type="number" placeholder="0"/></div>
+      <div id="bf-baseline-note" class="baseline-note"></div>
+      <div class="form-row">
+        <div class="form-group"><label>💧 Water Init</label><input id="bf-waterInit" type="number" placeholder="0" oninput="calculateBill()"/></div>
+        <div class="form-group"><label>💧 Water Final</label><input id="bf-waterFinal" type="number" placeholder="0" oninput="calculateBill()"/></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>⚡ Power Init</label><input id="bf-powerInit" type="number" placeholder="0" oninput="calculateBill()"/></div>
+        <div class="form-group"><label>⚡ Power Final</label><input id="bf-powerFinal" type="number" placeholder="0" oninput="calculateBill()"/></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Water Rate</label><input id="bf-waterRate" type="number" placeholder="0" oninput="calculateBill()"/></div>
+        <div class="form-group"><label>Power Rate</label><input id="bf-powerRate" type="number" placeholder="0" oninput="calculateBill()"/></div>
+      </div>
+      <div id="bill-preview">
+        <div id="bp-water"></div><div id="bp-power"></div><div id="bp-rent"></div>
+        <hr style="border-color:var(--border);margin:8px 0"/><div id="bp-total"></div>
+      </div>
+    </div>
+    <div class="modal-footer"><button class="btn-sm btn-secondary" onclick="closeModal('modal-billing')">Cancel</button><button class="btn-primary" id="saveBillBtn" onclick="saveBill()" disabled>Save Bill</button></div>
+  </div>
+</div>
+
+<!-- Complaint -->
+<div class="modal-overlay" id="modal-complaint" onclick="if(event.target===this)closeModal('modal-complaint')">
+  <div class="modal-box">
+    <div class="modal-header"><span class="modal-title" id="complaint-form-title">Log Entry</span><button class="modal-close" onclick="closeModal('modal-complaint')">×</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>Room</label><select id="cf-roomId"></select></div>
+        <div class="form-group"><label>Type</label><select id="cf-type"><option value="complaint">Complaint</option><option value="maintenance">Maintenance</option><option value="note">Note</option><option value="compliment">Compliment</option></select></div>
+      </div>
+      <div class="form-group full"><label>Subject *</label><input id="cf-subject" placeholder="Brief summary…"/></div>
+      <div class="form-group full"><label>Details</label><textarea id="cf-body" rows="4" placeholder="Full description…"></textarea></div>
+    </div>
+    <div class="modal-footer"><button class="btn-sm btn-secondary" onclick="closeModal('modal-complaint')">Cancel</button><button class="btn-primary" onclick="saveComplaint()">Log Entry</button></div>
+  </div>
+</div>
+
+<!-- AI Settings -->
+<div class="modal-overlay" id="modal-ai-settings" onclick="if(event.target===this)closeModal('modal-ai-settings')">
+  <div class="modal-box" style="max-width:560px">
+    <div class="modal-header">
+      <span class="modal-title">⚙ AI Settings</span>
+      <button class="modal-close" onclick="closeModal('modal-ai-settings')">×</button>
+    </div>
+    <div class="modal-body">
+
+      <!-- API Key -->
+      <div class="settings-section">
+        <div class="settings-section-title">Groq API Key</div>
+        <div class="key-row">
+          <input type="password" id="ais-apikey" placeholder="gsk_…" style="flex:1"/>
+          <button class="btn-icon" id="ais-toggle-key" onclick="toggleKeyVisible()" title="Show/hide">👁</button>
+          <button class="btn-icon" onclick="pasteApiKey()" title="Paste from clipboard">📋</button>
+          <button class="btn-icon" onclick="clearApiKey()" title="Clear key" style="color:var(--red)">✕</button>
+        </div>
+        <button class="btn-sm btn-secondary" id="ais-test-btn" onclick="testApiKey()" style="align-self:flex-start">Test Connection</button>
+        <div class="test-result" id="ais-test-result"></div>
+      </div>
+
+      <!-- Model -->
+      <div class="settings-section">
+        <div class="settings-section-title">Model</div>
+        <div class="form-group"><select id="ais-model"></select></div>
+      </div>
+
+      <!-- Temperature -->
+      <div class="settings-section">
+        <div class="settings-section-title">Temperature <span style="color:var(--dim);font-weight:400;font-size:11px">(0 = focused · 2 = creative)</span></div>
+        <div class="slider-row">
+          <span style="color:var(--dim);font-size:11px">0.00</span>
+          <input type="range" id="ais-temp" min="0" max="200" step="1" oninput="onTempChange(this.value)"/>
+          <span style="color:var(--dim);font-size:11px">2.00</span>
+          <span class="slider-val" id="ais-temp-label">0.70</span>
+        </div>
+      </div>
+
+      <!-- Max tokens -->
+      <div class="settings-section">
+        <div class="settings-section-title">Max Tokens</div>
+        <div class="slider-row">
+          <span style="color:var(--dim);font-size:11px">128</span>
+          <input type="range" id="ais-tokens" min="0" max="31" step="1" oninput="onTokensChange(this.value)"/>
+          <span style="color:var(--dim);font-size:11px">4096</span>
+          <span class="slider-val" id="ais-tokens-label">1024</span>
+        </div>
+      </div>
+
+      <!-- System Prompt -->
+      <div class="settings-section">
+        <div class="settings-section-title">System Prompt</div>
+        <div class="form-group"><textarea id="ais-prompt" rows="5" style="font-size:12px;line-height:1.5"></textarea></div>
+      </div>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn-sm btn-danger" onclick="resetAiDefaults()">Reset Defaults</button>
+      <button class="btn-sm btn-secondary" onclick="closeModal('modal-ai-settings')">Cancel</button>
+      <button class="btn-primary" onclick="saveAiSettings()">Save Settings</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+</body>
+</html>

@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bgG" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#161B27"/>
+      <stop offset="1" stop-color="#0B0D13"/>
+    </linearGradient>
+    <linearGradient id="coverG" x1="14" y1="10" x2="14" y2="54" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2E3650"/>
+      <stop offset="1" stop-color="#1E2433"/>
+    </linearGradient>
+    <linearGradient id="pageG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F4F6FB"/>
+      <stop offset="1" stop-color="#DCE1EE"/>
+    </linearGradient>
+    <linearGradient id="penBody" x1="18" y1="50" x2="54" y2="14" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4F72FF"/>
+      <stop offset="0.55" stop-color="#7C93FF"/>
+      <stop offset="1" stop-color="#B7C4FF"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="46" cy="16" r="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8FE3C4" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#8FE3C4" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- background -->
+  <rect width="64" height="64" rx="14" fill="url(#bgG)"/>
+  <rect width="64" height="64" rx="14" fill="none" stroke="#2A3144" stroke-width="1.5"/>
+
+  <!-- notebook shadow -->
+  <rect x="11" y="12" width="34" height="42" rx="4" fill="#000" opacity="0.25"/>
+
+  <!-- notebook cover -->
+  <rect x="9" y="9" width="34" height="42" rx="4" fill="url(#coverG)" stroke="#3A4260" stroke-width="1"/>
+
+  <!-- spine binding rings -->
+  <g fill="#0F1117" stroke="#4F5A7A" stroke-width="0.8">
+    <circle cx="9" cy="16" r="1.6"/>
+    <circle cx="9" cy="23" r="1.6"/>
+    <circle cx="9" cy="30" r="1.6"/>
+    <circle cx="9" cy="37" r="1.6"/>
+    <circle cx="9" cy="44" r="1.6"/>
+  </g>
+
+  <!-- page peeking out -->
+  <rect x="13" y="12" width="27" height="36" rx="2.5" fill="url(#pageG)"/>
+
+  <!-- ruled lines -->
+  <g stroke="#B9C2D6" stroke-width="1" stroke-linecap="round">
+    <line x1="17" y1="19" x2="36" y2="19"/>
+    <line x1="17" y1="24" x2="36" y2="24"/>
+    <line x1="17" y1="29" x2="30" y2="29"/>
+  </g>
+
+  <!-- accent teal checkmark / spark on page -->
+  <path d="M17 36 L21 40 L29 32" fill="none" stroke="#10B981" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- glow behind pen tip -->
+  <circle cx="46" cy="16" r="10" fill="url(#glow)"/>
+
+  <!-- pen, diagonal across notebook -->
+  <g transform="rotate(45 40 26)">
+    <rect x="22" y="23" width="34" height="7" rx="3.5" fill="url(#penBody)"/>
+    <rect x="22" y="23" width="34" height="2.4" rx="1.2" fill="#ffffff" opacity="0.35"/>
+    <path d="M56 23 L63 26.5 L56 30 Z" fill="#2A3144"/>
+    <path d="M56 24.4 L60.5 26.5 L56 28.6 Z" fill="#E8EDFB"/>
+    <rect x="19" y="23.8" width="5" height="5.4" rx="1" fill="#0F1117"/>
+  </g>
+</svg>
