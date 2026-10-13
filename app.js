@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   RentReview · app.js
+   Rentveiw · app.js
    Application logic (ES module) — Firebase Auth + Firestore,
    rooms, tenants, readings, billing, complaints, AI assistant.
    Loaded by index.html with <script type="module">.
@@ -17,6 +17,7 @@
   } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
   import { firebaseConfig } from "./firebase-config.js";
+  import { initInsights, renderHome, usageTrends, esc } from "./insights.js";
   // ─────────────────────────────────────────────────────────────────────────
 
   const app  = initializeApp(firebaseConfig);
@@ -86,7 +87,7 @@
     model:        "llama-3.3-70b-versatile",
     temperature:  0.7,
     maxTokens:    1024,
-    systemPrompt: "You are Rent Review AI — an intelligent property management assistant embedded inside the Rent Review web app used by a Kenyan landlord. Your knowledge is strictly limited to the property data provided in each message. Do not invent tenants, rooms, bills, or any figures not present in the data. Be concise, direct, and practical. Use KES for currency. When answering, cite specific room names, tenant names, or months from the data. If the data does not contain enough information to answer, say so clearly."
+    systemPrompt: "You are Rentveiw AI — an intelligent property management assistant embedded inside the Rentveiw web app used by a Kenyan landlord. Your knowledge is strictly limited to the property data provided in each message. Do not invent tenants, rooms, bills, or any figures not present in the data. Be concise, direct, and practical. Use KES for currency. When answering, cite specific room names, tenant names, or months from the data. If the data does not contain enough information to answer, say so clearly."
   };
   const AVAILABLE_MODELS = [
     "llama-3.3-70b-versatile",
@@ -107,6 +108,18 @@
   let editTarget  = null;
   let aiSnapshot  = null;          // cached property data for AI
   let chatHistory = [];            // [{role,content}]
+
+  // One-time tidy: older saved AI prompts may still use the previous app name.
+  try { const sp = localStorage.getItem('rr_ai_systemPrompt'); if (sp && /Rent ?Review/.test(sp)) localStorage.setItem('rr_ai_systemPrompt', sp.replace(/Rent ?Review/g, 'Rentveiw')); } catch(e) {}
+
+  // Dashboard upgrades (welcome hero, health charts, search…) live in insights.js
+  initInsights({
+    data: () => ({ rooms, tenants, readings, bills, complaints }),
+    user: () => ({ authUser: currentUser, building: buildingName, cc: countryCode }),
+    go: (p) => navigate(p),
+    openRoom: (id) => navigate('room-detail', { roomId: id }),
+    openNew: (id) => { navigate(id === 'modal-room' ? 'rooms' : id === 'modal-tenant' ? 'tenants' : id === 'modal-reading' ? 'readings' : id === 'modal-billing' ? 'billing' : 'complaints'); window.openNewModal(id); }
+  });
 
   // ── Boot ─────────────────────────────────────────────────────────────────
   window.addEventListener('DOMContentLoaded', () => {
@@ -285,7 +298,7 @@
     try {
       await setDoc(doc(db,'users',currentUser.uid), { buildingName:name, countryCode:cc }, { merge:true });
       buildingName = name; countryCode = cc;
-      document.querySelectorAll('.brand-name').forEach(el=>el.textContent = buildingName || 'RentReview');
+      document.querySelectorAll('.brand-name').forEach(el=>el.textContent = buildingName || 'Rentveiw');
       showToast('Settings saved'); closeModal('modal-settings');
     } catch(e) { showToast(e.message,'error'); }
   };
@@ -317,7 +330,7 @@
     document.getElementById('loginScreen').style.display='none';
     document.getElementById('onboardScreen').style.display='none';
     document.getElementById('appShell').style.display='flex';
-    document.querySelectorAll('.brand-name').forEach(el=>el.textContent = buildingName || 'RentReview');
+    document.querySelectorAll('.brand-name').forEach(el=>el.textContent = buildingName || 'Rentveiw');
     document.getElementById('topbar-account-email').textContent = currentUser.email || '';
     startLiveSync();
     navigate('dashboard');
@@ -401,9 +414,11 @@
     document.getElementById('stat-pending-count').textContent = pending.length;
     document.getElementById('stat-complaints').textContent = openComp;
     document.getElementById('stat-tenants').textContent    = tenants.length;
+    renderHome();
     const ul = document.getElementById('pending-list');
+    const curMonth = new Date().getFullYear()+'-'+String(new Date().getMonth()+1).padStart(2,'0');
     if(pending.length===0){ ul.innerHTML='<li class="empty-item">✓ All bills settled</li>'; }
-    else { ul.innerHTML=pending.slice(0,8).map(b=>{ const room=rooms.find(r=>r.id===b.roomId); return `<li class="pending-item"><span class="pi-room">${room?room.name:'Unknown'} <span class="pi-month">${b.month||''}</span></span><span class="pi-amt">KES ${(b.total||0).toLocaleString('en-KE',{minimumFractionDigits:0})}</span><button class="btn-xs btn-green" onclick="markPaid('${b.id}')">Mark Paid</button></li>`; }).join(''); }
+    else { ul.innerHTML=pending.slice(0,8).map(b=>{ const room=rooms.find(r=>r.id===b.roomId); return `<li class="pending-item"><span class="pi-room">${room?esc(room.name):'Unknown'} <span class="pi-month">${esc(b.month||'')}</span>${(b.month && b.month<curMonth)?'<span class="od-badge">Overdue</span>':''}</span><span class="pi-amt">KES ${(b.total||0).toLocaleString('en-KE',{minimumFractionDigits:0})}</span><button class="btn-xs btn-whatsapp" onclick="remindBill('${b.id}')" title="Send a payment reminder on WhatsApp">🔔 Remind</button><button class="btn-xs btn-green" onclick="markPaid('${b.id}')">Mark Paid</button></li>`; }).join(''); }
     const cl=document.getElementById('complaints-preview');
     const openList=complaints.filter(c=>c.status!=='resolved').slice(0,5);
     if(openList.length===0){ cl.innerHTML='<li class="empty-item">No open issues</li>'; }
@@ -502,6 +517,8 @@
           <ul>${roomComplaints.length? roomComplaints.map(x=>`<li class="pending-item"><span class="pi-room">${x.subject} <span class="pi-month tag-${x.type}">${x.type}</span></span><span class="status-badge status-${x.status}">${x.status}</span></li>`).join('') : '<li class="empty-item">Nothing logged</li>'}</ul>
         </div>
       </div>
+
+      ${usageTrends(roomBills)}
 
       <div class="dash-card" style="margin-top:16px">
         <div class="dash-card-title">Billing History & PDF Catalog (${roomBills.length}) <button class="btn-xs btn-primary" style="float:right" onclick="openNewModal('modal-billing');setVal('bf-roomId','${r.id}');bfRoomChanged()">+ Generate Bill</button></div>
@@ -671,7 +688,7 @@
     let y = 56;
 
     doc.setFont('helvetica','bold'); doc.setFontSize(20); doc.setTextColor(20,20,20);
-    doc.text(meta.buildingName || 'RentReview', marginX, y);
+    doc.text(meta.buildingName || 'Rentveiw', marginX, y);
     doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(100,100,100);
     doc.text('Official Payment Statement', marginX, y+16);
     doc.setFontSize(9);
@@ -730,7 +747,7 @@
     y += 40;
     doc.setDrawColor(210,210,210); doc.line(marginX, y, pageW-marginX, y); y += 16;
     doc.setFontSize(8.5); doc.setTextColor(140,140,140);
-    doc.text(`${meta.buildingName || 'RentReview'} · Generated automatically via RentReview · This is a system-generated statement.`, marginX, y);
+    doc.text(`${meta.buildingName || 'Rentveiw'} · Generated automatically via Rentveiw · This is a system-generated statement.`, marginX, y);
     return doc;
   }
 
@@ -748,7 +765,7 @@
   // ── SHAREABLE SLIP LINK (no Firebase Storage needed) ─────────────────────
   // Instead of uploading a PDF file anywhere, we publish just the bill's
   // display data to a public Firestore doc (small, text-only) and hand out
-  // a link back into this same app: rentreview.html?slip=<id>. Opening
+  // a link back into this same app: index.html?slip=<id>. Opening
   // that link — no sign-in required — shows the tenant a clean invoice
   // page and lets *their own browser* generate and download the PDF on
   // the spot via jsPDF. Nothing is ever hosted or stored as a file.
@@ -786,7 +803,7 @@
   // SMS gateway, no file storage, nothing that can silently break.
   function billMessageText(b, room, tenant, shareUrl) {
     const who = tenant?.name ? `Hi ${tenant.name},` : 'Hi,';
-    return `${who} here is your ${b.month||''} rent statement for ${room?room.name:'your room'} at ${buildingName||'RentReview'}. `
+    return `${who} here is your ${b.month||''} rent statement for ${room?room.name:'your room'} at ${buildingName||'Rentveiw'}. `
          + `Total due: KES ${(b.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}. `
          + `View/download your slip: ${shareUrl}`;
   }
@@ -826,6 +843,68 @@
     } catch(e) { showToast(e.message, 'error'); }
   };
 
+  // ── PAYMENT REMINDERS & LEASE NUDGES ─────────────────────────────────────
+  // One tap opens WhatsApp with a polite, ready-written message. Reminders
+  // reuse the shareable slip link so the tenant can see exactly what is due.
+  window.remindBill = async function(billId) {
+    try {
+      const { b, room, tenant, phone } = await resolveSendTarget(billId);
+      showToast('Preparing reminder…');
+      const { shareUrl } = await ensureShareLink(billId);
+      const hi = tenant?.name ? `Hi ${tenant.name},` : 'Hi,';
+      const text = `${hi} a friendly reminder that your ${b.month||''} statement for ${room?room.name:'your room'} at ${buildingName||'Rentveiw'} `
+                 + `(KES ${(b.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}) is still open. `
+                 + `You can view or download your slip here: ${shareUrl} — thank you!`;
+      window.open(`https://wa.me/${phone}?text=${encodeURIComponent(text)}`, '_blank');
+    } catch(e) { showToast(e.message, 'error'); }
+  };
+  window.nudgeLease = function(tenantId) {
+    const t = tenants.find(x=>x.id===tenantId); if (!t) return;
+    const phone = normalizePhone(t.phone);
+    if (!phone) { showToast(t.phone ? `Couldn't recognize "${t.phone}" as a phone number` : 'No phone number on file for this tenant', 'error'); return; }
+    const room = rooms.find(r=>r.id===t.roomId);
+    const text = `Hi ${t.name||''}, this is ${buildingName||'your landlord'}. Your lease${room?` for ${room.name}`:''} ends on ${t.leaseEnd}. `
+               + `Would you like to renew? Let me know and we can sort out the details.`;
+    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(text)}`, '_blank');
+  };
+
+  // ── EXPORTS & BACKUP ─────────────────────────────────────────────────────
+  function csvCell(v) {
+    v = v == null ? '' : String(v);
+    if (/^[=@]/.test(v) || /^[+\-][^\d\s]/.test(v)) v = "'" + v;   // stop spreadsheet formula injection
+    return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+  }
+  function downloadFile(name, text, type) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type }));
+    a.download = name; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  }
+  const stamp = () => new Date().toISOString().slice(0,10);
+  window.exportCsv = function(kind) {
+    const rn = id => (rooms.find(r=>r.id===id)||{}).name || '';
+    const sets = {
+      tenants:  [['Name','ID / Passport','Room','Phone','Email','Gender','Occupants','Move-in','Lease end','Deposit (KES)','Notes'],
+                 tenants.map(t=>[t.name,t.idNum,rn(t.roomId),t.phone,t.email,t.gender,t.occupants,t.moveIn,t.leaseEnd,t.deposit,t.notes])],
+      readings: [['Date','Room','Water','Power','Rent status','Amount paid (KES)','Notes'],
+                 readings.map(r=>[r.date,rn(r.roomId),r.water,r.power,r.rentStatus,r.amountPaid,r.notes])],
+      bills:    [['Month','Room','Water init','Water final','Water used','Water rate','Water cost','Power init','Power final','Power used','Power rate','Power cost','Rent','Total','Status'],
+                 bills.map(b=>[b.month,rn(b.roomId),b.waterInit,b.waterFinal,b.waterUsed,b.waterRate,b.waterCost,b.powerInit,b.powerFinal,b.powerUsed,b.powerRate,b.powerCost,b.rent,b.total,b.paid?'Paid':'Unpaid'])]
+    };
+    const s = sets[kind]; if (!s) return;
+    if (!s[1].length) { showToast('Nothing to export yet','error'); return; }
+    const csv = '\uFEFF' + [s[0], ...s[1]].map(row => row.map(csvCell).join(',')).join('\r\n');
+    downloadFile(`Rentveiw-${kind}-${stamp()}.csv`, csv, 'text/csv;charset=utf-8');
+    showToast(`${kind.charAt(0).toUpperCase()+kind.slice(1)} exported ✓`);
+  };
+  window.downloadBackup = function() {
+    const strip = list => list.map(({ pdfDataUrl, ...rest }) => rest);   // slips are rebuilt on demand, so skip the heavy PDF data
+    const data = { app:'Rentveiw', exportedAt:new Date().toISOString(), building:{ name:buildingName, countryCode },
+                   rooms, tenants, readings, bills:strip(bills), complaints };
+    downloadFile(`Rentveiw-backup-${stamp()}.json`, JSON.stringify(data, null, 2), 'application/json');
+    showToast('Backup downloaded ✓');
+  };
+
   // ── PUBLIC SLIP PAGE ──────────────────────────────────────────────────────
   // Reached via ?slip=<billId> with no sign-in. Reads the one sanitized
   // public doc for that bill and renders a clean, mobile-friendly invoice
@@ -852,7 +931,7 @@
       <div class="slip-box">
         <div class="slip-header">
           <div>
-            <div class="slip-brand">${meta.buildingName || 'RentReview'}</div>
+            <div class="slip-brand">${meta.buildingName || 'Rentveiw'}</div>
             <div class="slip-sub">Official Payment Statement</div>
           </div>
           <span class="status-badge status-${meta.paid?'occupied':'unpaid'}">${meta.paid?'PAID':'PENDING'}</span>
@@ -877,7 +956,7 @@
           <button class="btn-primary" onclick="downloadSlipPdf()">⬇ Download PDF</button>
           <button class="btn-secondary" onclick="window.print()">🖨 Print</button>
         </div>
-        <div class="slip-footer">Powered by RentReview</div>
+        <div class="slip-footer">Powered by Rentveiw</div>
       </div>`;
   }
   window.downloadSlipPdf = function() {
@@ -894,7 +973,7 @@
       const pdfCell = b.pdfDataUrl
         ? `<a class="btn-xs btn-secondary" href="${b.pdfDataUrl}" download="${(room?room.name:'room')}-${b.month||'bill'}.pdf">⬇ PDF</a>`
         : `<button class="btn-xs btn-secondary" onclick="generateBillPdf('${b.id}')">📄 PDF</button>`;
-      return `<tr class="${b.paid?'row-paid':''}"><td>${b.month||'—'}</td><td>${room?room.name:'—'}</td><td class="num-cell">KES ${(b.waterCost||0).toFixed(2)}</td><td class="num-cell">KES ${(b.powerCost||0).toFixed(2)}</td><td class="num-cell">KES ${(b.rent||0).toFixed(2)}</td><td class="num-cell total-cell">KES ${(b.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</td><td class="td-actions"><button class="btn-xs ${b.paid?'btn-secondary':'btn-green'}" onclick="togglePaid('${b.id}',${b.paid})">${b.paid?'Paid ✓':'Mark Paid'}</button>${pdfCell}<button class="btn-xs btn-sms" onclick="sendBillSms('${b.id}')" title="Send via SMS">📲 SMS</button><button class="btn-xs btn-whatsapp" onclick="sendBillWhatsApp('${b.id}')" title="Send via WhatsApp">💬 WA</button><button class="btn-xs btn-danger" onclick="deleteBill('${b.id}')">✕</button></td></tr>`;
+      return `<tr class="${b.paid?'row-paid':''}"><td>${b.month||'—'}</td><td>${room?room.name:'—'}</td><td class="num-cell">KES ${(b.waterCost||0).toFixed(2)}</td><td class="num-cell">KES ${(b.powerCost||0).toFixed(2)}</td><td class="num-cell">KES ${(b.rent||0).toFixed(2)}</td><td class="num-cell total-cell">KES ${(b.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</td><td class="td-actions"><button class="btn-xs ${b.paid?'btn-secondary':'btn-green'}" onclick="togglePaid('${b.id}',${b.paid})">${b.paid?'Paid ✓':'Mark Paid'}</button>${pdfCell}<button class="btn-xs btn-sms" onclick="sendBillSms('${b.id}')" title="Send via SMS">📲 SMS</button><button class="btn-xs btn-whatsapp" onclick="sendBillWhatsApp('${b.id}')" title="Send via WhatsApp">💬 WA</button>${b.paid?'':`<button class="btn-xs btn-secondary" onclick="remindBill('${b.id}')" title="Send a payment reminder on WhatsApp">🔔</button>`}<button class="btn-xs btn-danger" onclick="deleteBill('${b.id}')">✕</button></td></tr>`;
     }).join('');
   }
   window.filterBills = function(){ const roomId=document.getElementById('bills-room-filter').value; renderBills(roomId?bills.filter(b=>b.roomId===roomId):bills); };
@@ -929,7 +1008,7 @@
   async function initAiPage() {
     updateModelBadge();
     if (!document.getElementById('ai-messages').children.length) {
-      appendAiBubble("Hello! I'm your Rent Review AI agent. I have full access to all your property data — rooms, tenants, bills, meter readings, and complaints. What would you like to know?");
+      appendAiBubble("Hello! I'm your Rentveiw AI agent. I have full access to all your property data — rooms, tenants, bills, meter readings, and complaints. What would you like to know?");
       await prefetchAiData();
     }
   }
@@ -1058,7 +1137,7 @@
   window.clearAiChat = function() {
     document.getElementById('ai-messages').innerHTML = '';
     chatHistory = [];
-    appendAiBubble("Chat cleared. Hello again! I'm your Rent Review AI agent. What would you like to know about your property?");
+    appendAiBubble("Chat cleared. Hello again! I'm your Rentveiw AI agent. What would you like to know about your property?");
   };
 
   window.refreshAiData = async function() {

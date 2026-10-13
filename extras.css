@@ -1,4 +1,4 @@
-/* RentReview · extras.css — themes, typography, info pages (loads after styles.css) */
+/* Rentveiw · extras.css — themes, typography, info pages (loads after styles.css) */
 :root{--font:'Inter',system-ui,'Segoe UI',sans-serif;--fs:1;--fw:400}
 html[data-font="inter"]{--font:'Inter',system-ui,'Segoe UI',sans-serif}
 html[data-font="lora"]{--font:'Lora',Georgia,'Times New Roman',serif}

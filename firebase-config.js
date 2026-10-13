@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────
-//  RentReview · Firebase configuration
+//  Rentveiw · Firebase configuration
 //  Paste your own Firebase web-app config here. This is the only
 //  file you need to touch when pointing the app at a new project.
 // ─────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-/* RentReview · extras.js — theme, typography, About / Terms / Privacy / Contact pages */
+/* Rentveiw · extras.js — theme, typography, About / Terms / Privacy / Contact pages */
 (function () {
   'use strict';
   var D = document, R = D.documentElement, EMAIL = 'artyourtaste@gmail.com';
@@ -62,7 +62,7 @@
   var PAGES = {
     about: ['About', function () {
       return '<section class="hero"><div class="orb"></div><div class="hero-emoji">🏠</div><h1>Rent, without the rummaging.</h1>' +
-        '<p>RentReview is a calm little ledger for landlords — rooms, tenants, meters, bills and complaints in one tidy place, made for the way rent really works day to day.</p></section>' +
+        '<p>Rentveiw is a calm little ledger for landlords — rooms, tenants, meters, bills and complaints in one tidy place, made for the way rent really works day to day.</p></section>' +
         cards([
           ['🚪', 'Rooms that remember', 'Every room keeps its own history of rent, readings and notes.'],
           ['🔢', 'Meters, sorted', 'Log water and power readings; units and costs are worked out for you.'],
@@ -72,28 +72,28 @@
           ['🎨', 'Yours to style', 'Light or dark, five typefaces, and your building’s name on top.']
         ]) +
         '<h2>How it works</h2><ol class="steps"><li><b>Name your building</b><span>It appears on your dashboard and on every tenant slip — rename it any time with the ✎ beside the name.</span></li>' +
-        '<li><b>Add rooms &amp; tenants</b><span>Set rents and meter rates once; RentReview remembers them.</span></li>' +
+        '<li><b>Add rooms &amp; tenants</b><span>Set rents and meter rates once; Rentveiw remembers them.</span></li>' +
         '<li><b>Read, bill, share</b><span>Enter the month’s readings, generate the bill, send the slip. Done.</span></li></ol>' +
         '<div class="note-card">✨ Made with care by a small independent team. Got an idea, a bug, or a kind word? <a href="#contact" data-info="contact">Say hello →</a></div>';
     }],
 
     terms: ['Terms & Conditions', function () {
-      return '<section class="hero slim"><div class="hero-emoji">📜</div><h1>Terms &amp; Conditions</h1><p>The ground rules for using RentReview — kept as readable as we can make them. <em>' + UPDATED + '</em></p></section>' +
-        sec(1, 'Agreeing to these terms', 'using RentReview means you accept these rules.', '<p>By creating an account or using RentReview you agree to these Terms and our <a href="#privacy" data-info="privacy">Privacy Policy</a>. If you don’t agree, please don’t use the service.</p>') +
-        sec(2, 'What RentReview is', 'a record-keeping and billing helper, not an accountant or lawyer.', '<p>RentReview helps landlords track rooms, tenants, meter readings, bills and complaints. Figures are calculated from what you enter; you are responsible for checking they are right before billing anyone. Nothing in the app is legal, tax or financial advice.</p>') +
+      return '<section class="hero slim"><div class="hero-emoji">📜</div><h1>Terms &amp; Conditions</h1><p>The ground rules for using Rentveiw — kept as readable as we can make them. <em>' + UPDATED + '</em></p></section>' +
+        sec(1, 'Agreeing to these terms', 'using Rentveiw means you accept these rules.', '<p>By creating an account or using Rentveiw you agree to these Terms and our <a href="#privacy" data-info="privacy">Privacy Policy</a>. If you don’t agree, please don’t use the service.</p>') +
+        sec(2, 'What Rentveiw is', 'a record-keeping and billing helper, not an accountant or lawyer.', '<p>Rentveiw helps landlords track rooms, tenants, meter readings, bills and complaints. Figures are calculated from what you enter; you are responsible for checking they are right before billing anyone. Nothing in the app is legal, tax or financial advice.</p>') +
         sec(3, 'Your account', 'keep your login safe; you’re responsible for what happens under it.', '<p>You sign in with email and password or Google. Keep your credentials private and tell us at once if you suspect misuse. You must be 18 or older, and give accurate information.</p>') +
         sec(4, 'Your data and your tenants’ data', 'your records stay yours — and you must handle tenants’ details lawfully.', '<p>You own the information you enter. You promise you have the right to store your tenants’ details (such as names, phone numbers and ID numbers) and to share slips with them, and that you will follow applicable data-protection law, including Kenya’s Data Protection Act, 2019.</p>') +
-        sec(5, 'Acceptable use', 'don’t misuse it, break it, or use it to harass people.', '<p>Do not use RentReview for anything unlawful, to harass or discriminate against tenants, to attempt to access other users’ data, to disrupt the service, or to upload malicious content.</p>') +
+        sec(5, 'Acceptable use', 'don’t misuse it, break it, or use it to harass people.', '<p>Do not use Rentveiw for anything unlawful, to harass or discriminate against tenants, to attempt to access other users’ data, to disrupt the service, or to upload malicious content.</p>') +
         sec(6, 'AI Assistant', 'AI answers can be wrong — double-check before acting.', '<p>The AI Assistant uses a third-party AI provider with an API key you supply. Answers may be incomplete or inaccurate and are not professional advice. You are responsible for your key and for any usage charges the provider makes.</p>') +
         sec(7, 'Shared slips', 'anyone with a slip link can see that slip.', '<p>When you share a slip by link, its contents are stored in a page that anyone holding the link can open without signing in. Only share links with the intended tenant. A shared slip is a snapshot; it does not update itself if you later change your records.</p>') +
-        sec(8, 'Availability and changes', 'we try to keep it running, but can’t promise it never breaks.', '<p>RentReview is provided “as is” and “as available”. Features may change, and the service may be interrupted for maintenance or reasons outside our control. Keep your own copies of anything critical. We may update these Terms; continued use after an update means you accept it.</p>') +
-        sec(9, 'Limits of liability', 'we’re not liable for indirect losses.', '<p>To the fullest extent the law allows, RentReview and its makers are not liable for indirect or consequential loss, lost rent, or losses arising from errors in data you entered or from third-party services. Nothing here limits liability that cannot lawfully be limited.</p>') +
+        sec(8, 'Availability and changes', 'we try to keep it running, but can’t promise it never breaks.', '<p>Rentveiw is provided “as is” and “as available”. Features may change, and the service may be interrupted for maintenance or reasons outside our control. Keep your own copies of anything critical. We may update these Terms; continued use after an update means you accept it.</p>') +
+        sec(9, 'Limits of liability', 'we’re not liable for indirect losses.', '<p>To the fullest extent the law allows, Rentveiw and its makers are not liable for indirect or consequential loss, lost rent, or losses arising from errors in data you entered or from third-party services. Nothing here limits liability that cannot lawfully be limited.</p>') +
         sec(10, 'Governing law', 'Kenyan law applies.', '<p>These Terms are governed by the laws of the Republic of Kenya, and disputes will be handled by its courts, unless mandatory law says otherwise.</p>') +
         sec(11, 'Contact', 'questions? Write to us.', '<p>' + MAIL + '</p>');
     }],
 
     privacy: ['Privacy', function () {
-      return '<section class="hero slim"><div class="hero-emoji">🔒</div><h1>Privacy Policy</h1><p>What RentReview stores, where it lives, and how you stay in control. <em>' + UPDATED + '</em></p></section>' +
+      return '<section class="hero slim"><div class="hero-emoji">🔒</div><h1>Privacy Policy</h1><p>What Rentveiw stores, where it lives, and how you stay in control. <em>' + UPDATED + '</em></p></section>' +
         cards([
           ['🗂️', 'What we hold', 'Your account email, building name and the records you enter.'],
           ['☁️', 'Where it lives', 'In Google Firebase, in a private space tied to your account.'],
@@ -108,7 +108,7 @@
         sec(6, 'Keeping and deleting data', '', '<p>Records stay until you delete them in the app. To erase your whole account and its data, email ' + MAIL + ' from your account address.</p>') +
         sec(7, 'Your rights', '', '<p>Under Kenya’s Data Protection Act, 2019 you may ask to access, correct or delete your personal data, and to object to certain processing. Email us and we’ll help. If you’re a tenant, contact your landlord first — they decide what is stored about you.</p>') +
         sec(8, 'Security', '', '<p>Data travels over HTTPS and is protected by Firebase security rules. No system is perfectly secure, so please use a strong, unique password.</p>') +
-        sec(9, 'Children', '', '<p>RentReview is for adults. It is not directed at anyone under 18.</p>') +
+        sec(9, 'Children', '', '<p>Rentveiw is for adults. It is not directed at anyone under 18.</p>') +
         sec(10, 'Changes and contact', '', '<p>If this policy changes, the date above changes. Questions: ' + MAIL + '</p>');
     }],
 
@@ -134,9 +134,9 @@
     if (shell) return;
     shell = D.createElement('div'); shell.id = 'infoScreen'; shell.setAttribute('role', 'dialog'); shell.setAttribute('aria-modal', 'true');
     shell.innerHTML = '<header class="info-top"><button type="button" class="btn-sm btn-secondary" data-info-close>← Back</button>' +
-      '<span class="info-brand">🏠 RentReview</span><button type="button" class="btn-icon" data-theme-toggle><span data-theme-icon></span></button></header>' +
+      '<span class="info-brand">🏠 Rentveiw</span><button type="button" class="btn-icon" data-theme-toggle><span data-theme-icon></span></button></header>' +
       '<nav class="info-tabs">' + Object.keys(PAGES).map(function (k) { return '<a href="#' + k + '" data-info="' + k + '">' + PAGES[k][0] + '</a>'; }).join('') + '</nav>' +
-      '<main id="info-body"></main><footer class="info-foot">© ' + new Date().getFullYear() + ' RentReview · ' + MAIL + '</footer>';
+      '<main id="info-body"></main><footer class="info-foot">© ' + new Date().getFullYear() + ' Rentveiw · ' + MAIL + '</footer>';
     D.body.appendChild(shell); body = shell.querySelector('#info-body');
   }
   function openInfo(key) {
@@ -144,12 +144,12 @@
     build(); current = key; body.innerHTML = '<article class="doc">' + PAGES[key][1]() + '</article>';
     shell.querySelectorAll('.info-tabs a').forEach(function (a) { a.classList.toggle('on', a.dataset.info === key); });
     shell.style.display = 'block'; shell.scrollTop = 0; D.body.style.overflow = 'hidden';
-    D.title = PAGES[key][0] + ' · RentReview'; apply();
+    D.title = PAGES[key][0] + ' · Rentveiw'; apply();
     if (location.hash !== '#' + key) history.pushState(null, '', '#' + key);
   }
   function closeInfo(silent) {
     if (!shell || shell.style.display !== 'block') return;
-    shell.style.display = 'none'; D.body.style.overflow = ''; D.title = 'RentReview'; current = null;
+    shell.style.display = 'none'; D.body.style.overflow = ''; D.title = 'Rentveiw'; current = null;
     if (!silent && PAGES[location.hash.slice(1)]) history.pushState(null, '', location.pathname + location.search);
   }
 
@@ -168,7 +168,7 @@
     }
     if (t.closest('[data-send]')) {
       var topic = (D.querySelector('#c-topics .chip.on') || {}).textContent || 'Message', name = D.getElementById('c-name').value.trim(), msg = D.getElementById('c-msg').value.trim();
-      location.href = 'mailto:' + EMAIL + '?subject=' + encodeURIComponent('RentReview · ' + topic.replace(/^\S+\s/, '')) +
+      location.href = 'mailto:' + EMAIL + '?subject=' + encodeURIComponent('Rentveiw · ' + topic.replace(/^\S+\s/, '')) +
         '&body=' + encodeURIComponent(msg + (name ? '\n\n— ' + name : ''));
     }
   });

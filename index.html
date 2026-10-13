@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RentReview</title>
+<title>Rentveiw</title>
 <meta name="theme-color" content="#0F1117">
 <script>try{var d=document.documentElement,g=function(k,f){return localStorage.getItem('rr_'+k)||f},t=g('theme','dark');if(t==='auto')t=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';d.dataset.theme=t;d.dataset.font=g('font','inter');d.dataset.size=g('size','md');d.style.setProperty('--fw',g('weight','400'))}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -19,6 +19,7 @@
 <!-- Styles -->
 <link rel="stylesheet" href="styles.css">
 <link rel="stylesheet" href="extras.css">
+<link rel="stylesheet" href="insights.css">
 
 <!-- PDF library -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -30,7 +31,7 @@
   <button type="button" class="btn-icon theme-fab" data-theme-toggle><span data-theme-icon></span></button>
   <div class="login-box">
     <div class="login-logo">🏠</div>
-    <div class="login-brand">RentReview</div>
+    <div class="login-brand">Rentveiw</div>
     <div class="login-sub" id="authTitle">Welcome back</div>
     <div class="login-sub2" id="authSub">Sign in to manage your building</div>
 
@@ -70,7 +71,7 @@
 <!-- App -->
 <div id="appShell" style="display:none">
   <nav id="sidebar">
-    <div class="sidebar-brand"><span class="brand-icon">🏠</span><span class="brand-name" id="brandName">RentReview</span><input class="brand-input" id="brandInput" maxlength="40" aria-label="Building name" placeholder="Building name"/><button type="button" class="brand-edit" id="brandEditBtn" title="Rename building" onclick="editBuildingName()">✎</button></div>
+    <div class="sidebar-brand"><span class="brand-icon">🏠</span><span class="brand-name" id="brandName">Rentveiw</span><input class="brand-input" id="brandInput" maxlength="40" aria-label="Building name" placeholder="Building name"/><button type="button" class="brand-edit" id="brandEditBtn" title="Rename building" onclick="editBuildingName()">✎</button></div>
     <ul class="nav-list">
       <li><a href="#" data-nav="dashboard"><span class="nav-icon">📊</span>Dashboard</a></li>
       <li><a href="#" data-nav="rooms"><span class="nav-icon">🚪</span>Rooms</a></li>
@@ -95,7 +96,7 @@
     <div class="topbar">
       <button class="hamburger" onclick="toggleSidebar()">☰</button>
       <span class="topbar-title" id="topbar-title">Dashboard</span>
-      <span></span>
+      <div class="topbar-right"><button type="button" class="search-btn" data-cmdk aria-label="Search (Ctrl K)">🔍 <span>Search</span><kbd>Ctrl K</kbd></button><span class="topbar-clock" id="topbar-clock"></span></div>
     </div>
 
     <div class="page-content">
@@ -103,7 +104,7 @@
       <!-- DASHBOARD -->
       <div class="page" id="page-dashboard">
         <div class="page-loader"><div class="spinner"></div>Loading…</div>
-        <div class="page-header"><h1 class="page-title">Dashboard</h1></div>
+        <div id="hero"></div>
         <div class="stat-grid">
           <div class="stat-card"><div class="stat-label">Total Rooms</div><div class="stat-value accent" id="stat-rooms">—</div></div>
           <div class="stat-card"><div class="stat-label">Occupied</div><div class="stat-value green" id="stat-occupied">—</div></div>
@@ -113,6 +114,10 @@
           <div class="stat-card"><div class="stat-label">Unpaid Bills</div><div class="stat-value red" id="stat-pending-count">—</div></div>
           <div class="stat-card"><div class="stat-label">Open Issues</div><div class="stat-value amber" id="stat-complaints">—</div></div>
           <div class="stat-card"><div class="stat-label">Tenants</div><div class="stat-value dim" id="stat-tenants">—</div></div>
+        </div>
+        <div class="insight-grid">
+          <div class="dash-card" id="health-card"></div>
+          <div class="stack"><div class="dash-card" id="collect-card"></div><div class="dash-card" id="lease-card"></div></div>
         </div>
         <div class="dash-grid">
           <div class="dash-card"><div class="dash-card-title">Pending Payments</div><ul id="pending-list"></ul></div>
@@ -136,7 +141,7 @@
       <!-- TENANTS -->
       <div class="page" id="page-tenants" style="display:none">
         <div class="page-loader"><div class="spinner"></div>Loading…</div>
-        <div class="page-header"><h1 class="page-title">Tenants</h1><button class="btn-primary" onclick="openNewModal('modal-tenant')">+ Add Tenant</button></div>
+        <div class="page-header"><h1 class="page-title">Tenants</h1><div class="hdr-actions"><button class="btn-secondary btn-sm" onclick="exportCsv('tenants')" title="Download as a spreadsheet file">⬇ Export CSV</button><button class="btn-primary" onclick="openNewModal('modal-tenant')">+ Add Tenant</button></div></div>
         <div class="table-wrap">
           <table><thead><tr><th>Name / ID</th><th>Room</th><th>Phone</th><th>Email</th><th>Move-in</th><th>Lease End</th><th></th></tr></thead>
           <tbody id="tenants-tbody"></tbody></table>
@@ -146,7 +151,7 @@
       <!-- READINGS -->
       <div class="page" id="page-readings" style="display:none">
         <div class="page-loader"><div class="spinner"></div>Loading…</div>
-        <div class="page-header"><h1 class="page-title">Meter Readings</h1><button class="btn-primary" onclick="openNewModal('modal-reading')">+ Add Reading</button></div>
+        <div class="page-header"><h1 class="page-title">Meter Readings</h1><div class="hdr-actions"><button class="btn-secondary btn-sm" onclick="exportCsv('readings')" title="Download as a spreadsheet file">⬇ Export CSV</button><button class="btn-primary" onclick="openNewModal('modal-reading')">+ Add Reading</button></div></div>
         <div class="filter-row"><select id="readings-room-filter" onchange="filterReadings()"></select></div>
         <div class="table-wrap">
           <table><thead><tr><th>Date</th><th>Room</th><th>Water</th><th>Power</th><th>Rent Status</th><th>Amount Paid</th><th></th></tr></thead>
@@ -157,7 +162,7 @@
       <!-- BILLING -->
       <div class="page" id="page-billing" style="display:none">
         <div class="page-loader"><div class="spinner"></div>Loading…</div>
-        <div class="page-header"><h1 class="page-title">Billing</h1><button class="btn-primary" onclick="openNewModal('modal-billing')">+ Generate Bill</button></div>
+        <div class="page-header"><h1 class="page-title">Billing</h1><div class="hdr-actions"><button class="btn-secondary btn-sm" onclick="exportCsv('bills')" title="Download as a spreadsheet file">⬇ Export CSV</button><button class="btn-primary" onclick="openNewModal('modal-billing')">+ Generate Bill</button></div></div>
         <div class="filter-row"><select id="bills-room-filter" onchange="filterBills()"></select></div>
         <div class="table-wrap">
           <table><thead><tr><th>Month</th><th>Room</th><th>Water</th><th>Power</th><th>Rent</th><th>Total</th><th></th></tr></thead>
@@ -244,6 +249,8 @@
         <div class="baseline-note" style="display:block;margin-top:6px">Used to auto-format tenant phone numbers (e.g. "0722…" → "254722…") when sending SMS or WhatsApp slips. Only change this if your tenants' numbers aren't in this country.</div>
       </div>
       <div class="form-group full"><label>Appearance</label><div id="appearance-panel"></div></div>
+      <div class="form-group full"><label>Backup</label><button type="button" class="btn-secondary btn-sm" onclick="downloadBackup()" style="align-self:flex-start">💾 Download full backup (.json)</button>
+        <div class="baseline-note" style="display:block;margin-top:6px">A copy of your building, rooms, tenants, readings, bills and complaints, saved to this device. Keep it somewhere safe.</div></div>
     </div>
     <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('modal-settings')">Cancel</button><button class="btn-primary" onclick="saveSettings()">Save</button></div>
   </div>
