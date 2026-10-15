@@ -18,6 +18,7 @@
 
   import { firebaseConfig } from "./firebase-config.js";
   import { initInsights, renderHome, usageTrends, esc } from "./insights.js";
+  import { buildInvoicePdf, slipPageHtml, usageHistory, makeSlipNo } from "./slip.js";
   // ─────────────────────────────────────────────────────────────────────────
 
   const app  = initializeApp(firebaseConfig);
@@ -32,6 +33,7 @@
   let currentUser     = null;   // firebase auth user object
   let buildingName    = '';     // this account's building name
   let countryCode     = '254';  // default dialing code used to auto-format tenant phone numbers (Kenya)
+  let payInfo         = {};     // how tenants pay (M-Pesa / bank) — printed on every slip
   let liveUnsub       = [];     // active onSnapshot unsubscribe fns
 
   function uidPath() {
@@ -253,6 +255,7 @@
   async function enterAccount(user) {
     const ref = doc(db, 'users', user.uid);
     const snap = await getDoc(ref);
+    payInfo = (snap.exists() && snap.data().payInfo && typeof snap.data().payInfo === 'object') ? snap.data().payInfo : {};
     if (!snap.exists() || !snap.data().buildingName) {
       // First time in — ask for the building name before showing the app.
       document.getElementById('loginScreen').style.display='none';
@@ -289,15 +292,20 @@
   // (e.g. if tenant numbers are being mis-formatted for SMS/WhatsApp).
   window.openSettings = function() {
     setVal('setName', buildingName); setVal('setCountryCode', countryCode);
+    setVal('setPayType', payInfo.mpesaType||''); setVal('setPayNumber', payInfo.mpesaNumber||''); setVal('setPayAccount', payInfo.mpesaAccount||'');
+    setVal('setBankName', payInfo.bankName||''); setVal('setBankAcctName', payInfo.bankAccountName||''); setVal('setBankAcctNo', payInfo.bankAccountNo||''); setVal('setPayNote', payInfo.note||'');
     openModal('modal-settings');
   };
   window.saveSettings = async function() {
     const name = val('setName');
     const cc = (val('setCountryCode')||'254').replace(/\D/g,'') || '254';
     if (!name) { showToast('Building name required','error'); return; }
+    const pi = { mpesaType:val('setPayType'), mpesaNumber:val('setPayNumber'), mpesaAccount:val('setPayAccount'), bankName:val('setBankName'), bankAccountName:val('setBankAcctName'), bankAccountNo:val('setBankAcctNo'), note:val('setPayNote') };
+    if (pi.mpesaType && !pi.mpesaNumber) { showToast('Enter the Paybill / Till / phone number for the M-Pesa method you picked','error'); return; }
+    if (pi.mpesaNumber && !pi.mpesaType) { showToast('Pick the M-Pesa method (Paybill, Till or Send Money)','error'); return; }
     try {
-      await setDoc(doc(db,'users',currentUser.uid), { buildingName:name, countryCode:cc }, { merge:true });
-      buildingName = name; countryCode = cc;
+      await setDoc(doc(db,'users',currentUser.uid), { buildingName:name, countryCode:cc, payInfo:pi }, { merge:true });
+      buildingName = name; countryCode = cc; payInfo = pi;
       document.querySelectorAll('.brand-name').forEach(el=>el.textContent = buildingName || 'Rentveiw');
       showToast('Settings saved'); closeModal('modal-settings');
     } catch(e) { showToast(e.message,'error'); }
@@ -479,7 +487,7 @@
     const roomReadings = readings.filter(x=>x.roomId===r.id);
     const roomBills = bills.filter(x=>x.roomId===r.id);
     const roomComplaints = complaints.filter(x=>x.roomId===r.id);
-    const pdfCount = roomBills.filter(b=>b.pdfDataUrl).length;
+    const pdfCount = roomBills.filter(b=>b.shareUrl||b.pdfDataUrl).length;
 
     el.innerHTML = `
       <div class="room-detail-header">
@@ -528,7 +536,7 @@
               <td>${b.month||'—'}</td>
               <td class="num-cell">KES ${(b.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</td>
               <td><span class="status-badge status-${b.paid?'occupied':'unpaid'}">${b.paid?'Paid':'Unpaid'}</span></td>
-              <td class="td-actions">${b.pdfDataUrl ? `<a class="btn-xs btn-secondary" href="${b.pdfDataUrl}" download="${(r.name||'room')}-${b.month||'bill'}.pdf">⬇ PDF</a>` : `<button class="btn-xs btn-secondary" onclick="generateBillPdf('${b.id}')">📄 PDF</button>`}<button class="btn-xs btn-sms" onclick="sendBillSms('${b.id}')" title="Send via SMS">📲 SMS</button><button class="btn-xs btn-whatsapp" onclick="sendBillWhatsApp('${b.id}')" title="Send via WhatsApp">💬 WA</button></td>
+              <td class="td-actions"><button class="btn-xs btn-secondary" onclick="downloadBillPdf('${b.id}')" title="Download the PDF slip">⬇ PDF</button><button class="btn-xs btn-sms" onclick="sendBillSms('${b.id}')" title="Send via SMS">📲 SMS</button><button class="btn-xs btn-whatsapp" onclick="sendBillWhatsApp('${b.id}')" title="Send via WhatsApp">💬 WA</button></td>
             </tr>`).join('') : '<tr><td colspan="4" class="empty-td">No bills yet.</td></tr>'}</tbody>
           </table>
         </div>
@@ -676,99 +684,31 @@
   window.deleteBill = async function(id){ if(!confirm('Delete this bill?')) return; try{ await delDoc('bills',id); showToast('Deleted'); }catch(e){ showToast(e.message,'error'); } };
 
   // ── OFFICIAL PDF PAYMENT SLIP ────────────────────────────────────────────
-  // Builds the formal invoice/statement layout with jsPDF from a flat
-  // "meta" object, so the exact same renderer works both for the
-  // landlord's own in-app PDF and for the public slip page a tenant opens
-  // from an SMS/WhatsApp link (see buildInvoicePdf below).
-  function buildInvoicePdf(meta) {
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF({ unit:'pt', format:'a4' });
-    const pageW = doc.internal.pageSize.getWidth();
-    const marginX = 48;
-    let y = 56;
-
-    doc.setFont('helvetica','bold'); doc.setFontSize(20); doc.setTextColor(20,20,20);
-    doc.text(meta.buildingName || 'Rentveiw', marginX, y);
-    doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(100,100,100);
-    doc.text('Official Payment Statement', marginX, y+16);
-    doc.setFontSize(9);
-    if (meta.issuedBy) doc.text(`Issued by ${meta.issuedBy}`, pageW-marginX, y-4, { align:'right' });
-    doc.text(`Generated: ${meta.generatedAt || new Date().toLocaleString('en-KE')}`, pageW-marginX, y+10, { align:'right' });
-    y += 30;
-    doc.setDrawColor(180,180,180); doc.line(marginX, y, pageW-marginX, y);
-    y += 26;
-
-    doc.setFont('helvetica','bold'); doc.setFontSize(13); doc.setTextColor(20,20,20);
-    doc.text('PAYMENT INVOICE', marginX, y); y += 22;
-    doc.setFont('helvetica','normal'); doc.setFontSize(10.5); doc.setTextColor(40,40,40);
-    const metaLeft = [
-      ['Room', meta.roomName || '—'],
-      ['Billing Month', meta.month || '—'],
-      ['Status', meta.paid ? 'PAID' : 'PENDING'],
-    ];
-    const metaRight = [
-      ['Tenant', meta.tenantName || '—'],
-      ['Phone', meta.tenantPhone || '—'],
-      ['Email', meta.tenantEmail || '—'],
-    ];
-    let my = y;
-    metaLeft.forEach(([k,v])=>{ doc.setFont('helvetica','bold'); doc.text(k+':', marginX, my); doc.setFont('helvetica','normal'); doc.text(String(v), marginX+90, my); my+=16; });
-    let my2 = y;
-    metaRight.forEach(([k,v])=>{ doc.setFont('helvetica','bold'); doc.text(k+':', marginX+280, my2); doc.setFont('helvetica','normal'); doc.text(String(v), marginX+350, my2); my2+=16; });
-    y = Math.max(my,my2) + 18;
-
-    const col = [marginX, marginX+230, marginX+330, marginX+430];
-    doc.setFillColor(30,30,30); doc.rect(marginX, y, pageW-2*marginX, 22, 'F');
-    doc.setTextColor(255,255,255); doc.setFont('helvetica','bold'); doc.setFontSize(10);
-    doc.text('Item', col[0]+8, y+15); doc.text('Detail', col[1], y+15); doc.text('Rate', col[2], y+15); doc.text('Amount (KES)', pageW-marginX-8, y+15, { align:'right' });
-    y += 22;
-    doc.setTextColor(30,30,30); doc.setFont('helvetica','normal');
-    const rows = [
-      ['Rent', '—', '—', (meta.rent||0)],
-      ['Water', `${meta.waterInit??0} → ${meta.waterFinal??0}  (${(meta.waterUsed||0).toFixed(2)} units)`, String(meta.waterRate||0), (meta.waterCost||0)],
-      ['Power', `${meta.powerInit??0} → ${meta.powerFinal??0}  (${(meta.powerUsed||0).toFixed(2)} kWh)`, String(meta.powerRate||0), (meta.powerCost||0)],
-    ];
-    rows.forEach((r,i)=>{
-      const ry = y + i*22 + 15;
-      if (i%2===1) { doc.setFillColor(245,245,245); doc.rect(marginX, y+i*22, pageW-2*marginX, 22, 'F'); }
-      doc.text(r[0], col[0]+8, ry); doc.text(r[1], col[1], ry); doc.text(r[2], col[2], ry);
-      doc.text(Number(r[3]).toLocaleString('en-KE',{minimumFractionDigits:2}), pageW-marginX-8, ry, { align:'right' });
-    });
-    y += rows.length*22 + 6;
-    doc.setDrawColor(180,180,180); doc.line(marginX, y, pageW-marginX, y); y += 20;
-
-    doc.setFont('helvetica','bold'); doc.setFontSize(13);
-    doc.text('TOTAL DUE', marginX, y);
-    doc.text(`KES ${(meta.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}`, pageW-marginX-8, y, { align:'right' });
-    y += 34;
-
-    doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(90,90,90);
-    doc.text(meta.paymentDesc || 'Please settle this amount by the agreed due date.', marginX, y);
-    y += 40;
-    doc.setDrawColor(210,210,210); doc.line(marginX, y, pageW-marginX, y); y += 16;
-    doc.setFontSize(8.5); doc.setTextColor(140,140,140);
-    doc.text(`${meta.buildingName || 'Rentveiw'} · Generated automatically via Rentveiw · This is a system-generated statement.`, marginX, y);
-    return doc;
-  }
-
+  // The layout itself lives in slip.js (buildInvoicePdf / slipPageHtml) so the
+  // landlord's PDF and the public page a tenant opens from an SMS/WhatsApp link
+  // are drawn from the exact same flat "meta" object.
   function billToMeta(b, room, tenant) {
-    return {
+    const meta = {
       buildingName, roomName: room?room.name:null, tenantName: tenant?tenant.name:null,
       tenantPhone: tenant?tenant.phone:null, tenantEmail: tenant?tenant.email:null,
       month: b.month, paid: !!b.paid, rent: b.rent||0,
       waterInit: b.waterInit, waterFinal: b.waterFinal, waterUsed: b.waterUsed, waterRate: b.waterRate, waterCost: b.waterCost||0,
       powerInit: b.powerInit, powerFinal: b.powerFinal, powerUsed: b.powerUsed, powerRate: b.powerRate, powerCost: b.powerCost||0,
       total: b.total||0, paymentDesc: room?.paymentDesc, issuedBy: currentUser?.email,
+      slipNo: makeSlipNo(b, room?room.name:''), history: usageHistory(bills, b), pay: { ...payInfo },
     };
+    // Firestore rejects `undefined`, so drop it before this object is ever saved.
+    return JSON.parse(JSON.stringify(meta));
   }
 
   // ── SHAREABLE SLIP LINK (no Firebase Storage needed) ─────────────────────
-  // Instead of uploading a PDF file anywhere, we publish just the bill's
-  // display data to a public Firestore doc (small, text-only) and hand out
-  // a link back into this same app: index.html?slip=<id>. Opening
-  // that link — no sign-in required — shows the tenant a clean invoice
-  // page and lets *their own browser* generate and download the PDF on
-  // the spot via jsPDF. Nothing is ever hosted or stored as a file.
+  // We publish just the bill's display data to a public Firestore doc
+  // (small, text-only) and hand out a link back into this same app:
+  // index.html?slip=<id>. Opening it — no sign-in — shows the tenant a clean
+  // statement and lets *their own browser* build and download the PDF.
+  // PDFs are never stored: they are drawn fresh from the latest data each
+  // time, so an old saved slip can never show an outdated layout.
+  function slipUrl(billId) { return `${location.origin}${location.pathname}?slip=${billId}`; }
   async function ensureShareLink(billId) {
     const b = bills.find(x=>x.id===billId);
     if (!b) throw new Error('Bill not found');
@@ -777,22 +717,38 @@
     const meta = billToMeta(b, room, tenant);
     meta.generatedAt = new Date().toLocaleString('en-KE');
     meta.ownerUid = currentUser.uid;
+    const shareUrl = slipUrl(billId);
+    meta.shareUrl = shareUrl;
     try {
       await setDoc(doc(db,'publicSlips',billId), meta, { merge:true });
     } catch(e) {
       console.error('publicSlips write failed', e);
       throw new Error('Could not publish the shareable slip — check the publicSlips Firestore rule (see setup notes).');
     }
-    const shareUrl = `${location.origin}${location.pathname}?slip=${billId}`;
-    const dataUrl = buildInvoicePdf(meta).output('datauristring');
-    await updDoc('bills', billId, { pdfDataUrl:dataUrl, shareUrl, pdfGeneratedAt:new Date().toISOString() });
-    return { dataUrl, shareUrl };
+    try { await updDoc('bills', billId, { shareUrl, pdfGeneratedAt:new Date().toISOString() }); }
+    catch(e) { console.warn('could not record share link on bill', e); }   // non-fatal: the link itself already works
+    return { meta, shareUrl };
   }
 
-  window.generateBillPdf = async function(billId) {
-    try { await ensureShareLink(billId); showToast('Slip ready ✓'); }
-    catch(e) { console.error(e); showToast(e.message, 'error'); }
+  const slipFilename = (meta) => `${(meta.roomName||'room')}-${meta.month||'bill'}.pdf`.replace(/[^\w.-]+/g,'-');
+
+  window.downloadBillPdf = async function(billId) {
+    try {
+      showToast('Building your slip…');
+      let meta;
+      try { ({ meta } = await ensureShareLink(billId)); }
+      catch(e) {
+        // Online copy failed (offline / rules) — still give the landlord a PDF, just without the QR code.
+        console.warn(e);
+        const b = bills.find(x=>x.id===billId); if (!b) throw new Error('Bill not found');
+        meta = billToMeta(b, rooms.find(r=>r.id===b.roomId), tenants.find(t=>t.roomId===b.roomId));
+        meta.generatedAt = new Date().toLocaleString('en-KE');
+        showToast('PDF made without the QR code — online copy could not be saved','error');
+      }
+      buildInvoicePdf(meta).save(slipFilename(meta));
+    } catch(e) { console.error(e); showToast(e.message || 'Could not build the PDF','error'); }
   };
+  window.generateBillPdf = window.downloadBillPdf;   // older buttons still work
 
   // ── SEND SLIP VIA SMS / WHATSAPP ─────────────────────────────────────────
   // The only thing we need from the account is the tenant's phone number —
@@ -927,42 +883,16 @@
       return;
     }
     window.__slipMeta = meta; // used by the Download button below
-    el.innerHTML = `
-      <div class="slip-box">
-        <div class="slip-header">
-          <div>
-            <div class="slip-brand">${meta.buildingName || 'Rentveiw'}</div>
-            <div class="slip-sub">Official Payment Statement</div>
-          </div>
-          <span class="status-badge status-${meta.paid?'occupied':'unpaid'}">${meta.paid?'PAID':'PENDING'}</span>
-        </div>
-        <div class="slip-meta">
-          <div><span>Room</span><b>${meta.roomName||'—'}</b></div>
-          <div><span>Tenant</span><b>${meta.tenantName||'—'}</b></div>
-          <div><span>Billing Month</span><b>${meta.month||'—'}</b></div>
-          <div><span>Generated</span><b>${meta.generatedAt||'—'}</b></div>
-        </div>
-        <table class="slip-table">
-          <thead><tr><th>Item</th><th>Detail</th><th>Rate</th><th style="text-align:right">Amount (KES)</th></tr></thead>
-          <tbody>
-            <tr><td>Rent</td><td>—</td><td>—</td><td class="num-cell">${(meta.rent||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</td></tr>
-            <tr><td>Water</td><td>${meta.waterInit??0} → ${meta.waterFinal??0} (${(meta.waterUsed||0).toFixed(2)} units)</td><td>${meta.waterRate||0}</td><td class="num-cell">${(meta.waterCost||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</td></tr>
-            <tr><td>Power</td><td>${meta.powerInit??0} → ${meta.powerFinal??0} (${(meta.powerUsed||0).toFixed(2)} kWh)</td><td>${meta.powerRate||0}</td><td class="num-cell">${(meta.powerCost||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</td></tr>
-          </tbody>
-        </table>
-        <div class="slip-total"><span>Total Due</span><b>KES ${(meta.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</b></div>
-        ${meta.paymentDesc ? `<div class="slip-note">${meta.paymentDesc}</div>` : ''}
-        <div class="slip-actions">
-          <button class="btn-primary" onclick="downloadSlipPdf()">⬇ Download PDF</button>
-          <button class="btn-secondary" onclick="window.print()">🖨 Print</button>
-        </div>
-        <div class="slip-footer">Powered by Rentveiw</div>
-      </div>`;
+    try { el.innerHTML = slipPageHtml(meta); }
+    catch(e) {
+      console.error('slip render failed', e);
+      el.innerHTML = `<div class="slip-box"><div class="slip-logo">⚠️</div><h2>Could not show this statement</h2><p class="slip-sub">Please contact your landlord for an updated statement.</p></div>`;
+    }
   }
   window.downloadSlipPdf = function() {
     const meta = window.__slipMeta; if (!meta) return;
-    const filename = `${(meta.roomName||'room')}-${meta.month||'bill'}.pdf`.replace(/\s+/g,'-');
-    buildInvoicePdf(meta).save(filename);
+    try { buildInvoicePdf({ ...meta, shareUrl: meta.shareUrl || location.href }).save(slipFilename(meta)); }
+    catch(e) { console.error(e); alert(e.message || 'Could not build the PDF'); }
   };
 
   function renderBills(list){
@@ -970,9 +900,7 @@
     if(list.length===0){ tbody.innerHTML='<tr><td colspan="8" class="empty-td">No bills yet.</td></tr>'; return; }
     tbody.innerHTML=list.map(b=>{
       const room=rooms.find(r=>r.id===b.roomId);
-      const pdfCell = b.pdfDataUrl
-        ? `<a class="btn-xs btn-secondary" href="${b.pdfDataUrl}" download="${(room?room.name:'room')}-${b.month||'bill'}.pdf">⬇ PDF</a>`
-        : `<button class="btn-xs btn-secondary" onclick="generateBillPdf('${b.id}')">📄 PDF</button>`;
+      const pdfCell = `<button class="btn-xs btn-secondary" onclick="downloadBillPdf('${b.id}')" title="Download the PDF slip">⬇ PDF</button>`;
       return `<tr class="${b.paid?'row-paid':''}"><td>${b.month||'—'}</td><td>${room?room.name:'—'}</td><td class="num-cell">KES ${(b.waterCost||0).toFixed(2)}</td><td class="num-cell">KES ${(b.powerCost||0).toFixed(2)}</td><td class="num-cell">KES ${(b.rent||0).toFixed(2)}</td><td class="num-cell total-cell">KES ${(b.total||0).toLocaleString('en-KE',{minimumFractionDigits:2})}</td><td class="td-actions"><button class="btn-xs ${b.paid?'btn-secondary':'btn-green'}" onclick="togglePaid('${b.id}',${b.paid})">${b.paid?'Paid ✓':'Mark Paid'}</button>${pdfCell}<button class="btn-xs btn-sms" onclick="sendBillSms('${b.id}')" title="Send via SMS">📲 SMS</button><button class="btn-xs btn-whatsapp" onclick="sendBillWhatsApp('${b.id}')" title="Send via WhatsApp">💬 WA</button>${b.paid?'':`<button class="btn-xs btn-secondary" onclick="remindBill('${b.id}')" title="Send a payment reminder on WhatsApp">🔔</button>`}<button class="btn-xs btn-danger" onclick="deleteBill('${b.id}')">✕</button></td></tr>`;
     }).join('');
   }

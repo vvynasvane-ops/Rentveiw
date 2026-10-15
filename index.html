@@ -23,6 +23,8 @@
 
 <!-- PDF library -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<!-- QR code generator (MIT, bundled locally so slips never depend on a CDN for it) -->
+<script src="qrcode.js"></script>
 </head>
 <body>
 
@@ -247,6 +249,16 @@
       <div class="form-group full"><label>Building Name</label><input id="setName" placeholder="e.g. Sunrise Apartments"/></div>
       <div class="form-group full"><label>Country Dialing Code</label><input id="setCountryCode" placeholder="e.g. 254"/>
         <div class="baseline-note" style="display:block;margin-top:6px">Used to auto-format tenant phone numbers (e.g. "0722…" → "254722…") when sending SMS or WhatsApp slips. Only change this if your tenants' numbers aren't in this country.</div>
+      </div>
+      <div class="form-group full"><label>&#128179; Payment instructions on tenant slips</label>
+        <div class="baseline-note" style="display:block;margin:0 0 8px">Tell tenants exactly how to pay. This appears in the "How to pay" steps on every PDF slip and online statement. Leave everything blank to show a simple default.</div>
+        <select id="setPayType" style="margin-bottom:8px"><option value="">M-Pesa method (optional)</option><option value="paybill">Paybill</option><option value="till">Till number (Buy Goods)</option><option value="send">Send Money (phone number)</option></select>
+        <input id="setPayNumber" placeholder="Paybill / Till / phone number" inputmode="numeric" maxlength="20" style="margin-bottom:8px"/>
+        <input id="setPayAccount" placeholder="Paybill account no. (blank = the room name, e.g. A1)" maxlength="30" style="margin-bottom:8px"/>
+        <input id="setBankName" placeholder="Bank name (optional)" maxlength="40" style="margin-bottom:8px"/>
+        <input id="setBankAcctName" placeholder="Bank account name" maxlength="50" style="margin-bottom:8px"/>
+        <input id="setBankAcctNo" placeholder="Bank account number" maxlength="30" style="margin-bottom:8px"/>
+        <input id="setPayNote" placeholder="Extra note, e.g. Send the M-Pesa message to 07xx xxx xxx" maxlength="120"/>
       </div>
       <div class="form-group full"><label>Appearance</label><div id="appearance-panel"></div></div>
       <div class="form-group full"><label>Backup</label><button type="button" class="btn-secondary btn-sm" onclick="downloadBackup()" style="align-self:flex-start">💾 Download full backup (.json)</button>
