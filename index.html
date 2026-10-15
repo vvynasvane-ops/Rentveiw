@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
 <title>Rentveiw</title>
 <meta name="theme-color" content="#0F1117">
 <script>try{var d=document.documentElement,g=function(k,f){return localStorage.getItem('rr_'+k)||f},t=g('theme','dark');if(t==='auto')t=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';d.dataset.theme=t;d.dataset.font=g('font','inter');d.dataset.size=g('size','md');d.style.setProperty('--fw',g('weight','400'))}catch(e){}</script>
@@ -20,6 +20,7 @@
 <link rel="stylesheet" href="styles.css">
 <link rel="stylesheet" href="extras.css">
 <link rel="stylesheet" href="insights.css">
+<link rel="stylesheet" href="responsive.css">
 
 <!-- PDF library -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -117,6 +118,7 @@
           <div class="stat-card"><div class="stat-label">Open Issues</div><div class="stat-value amber" id="stat-complaints">—</div></div>
           <div class="stat-card"><div class="stat-label">Tenants</div><div class="stat-value dim" id="stat-tenants">—</div></div>
         </div>
+        <div class="glance-grid"><div class="dash-card" id="board-card"></div><div class="dash-card" id="matrix-card"></div></div>
         <div class="insight-grid">
           <div class="dash-card" id="health-card"></div>
           <div class="stack"><div class="dash-card" id="collect-card"></div><div class="dash-card" id="lease-card"></div></div>
@@ -154,6 +156,7 @@
       <div class="page" id="page-readings" style="display:none">
         <div class="page-loader"><div class="spinner"></div>Loading…</div>
         <div class="page-header"><h1 class="page-title">Meter Readings</h1><div class="hdr-actions"><button class="btn-secondary btn-sm" onclick="exportCsv('readings')" title="Download as a spreadsheet file">⬇ Export CSV</button><button class="btn-primary" onclick="openNewModal('modal-reading')">+ Add Reading</button></div></div>
+        <div class="dash-card" id="reading-board" style="display:none"></div>
         <div class="filter-row"><select id="readings-room-filter" onchange="filterReadings()"></select></div>
         <div class="table-wrap">
           <table><thead><tr><th>Date</th><th>Room</th><th>Water</th><th>Power</th><th>Rent Status</th><th>Amount Paid</th><th></th></tr></thead>
@@ -165,6 +168,7 @@
       <div class="page" id="page-billing" style="display:none">
         <div class="page-loader"><div class="spinner"></div>Loading…</div>
         <div class="page-header"><h1 class="page-title">Billing</h1><div class="hdr-actions"><button class="btn-secondary btn-sm" onclick="exportCsv('bills')" title="Download as a spreadsheet file">⬇ Export CSV</button><button class="btn-primary" onclick="openNewModal('modal-billing')">+ Generate Bill</button></div></div>
+        <div class="dash-card" id="bill-matrix"></div>
         <div class="filter-row"><select id="bills-room-filter" onchange="filterBills()"></select></div>
         <div class="table-wrap">
           <table><thead><tr><th>Month</th><th>Room</th><th>Water</th><th>Power</th><th>Rent</th><th>Total</th><th></th></tr></thead>
@@ -466,6 +470,7 @@
 
 <!-- App logic -->
 <script src="extras.js"></script>
+<script src="responsive.js"></script>
 <script type="module" src="app.js"></script>
 </body>
 </html>

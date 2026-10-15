@@ -1,0 +1,158 @@
+/* ═══════════════════════════════════════════════════════════════
+   Rentveiw · responsive.css  — loaded last, so it wins.
+   Goals: every feature visible at every screen size, nothing that
+   needs sideways scrolling, thumb-friendly on phones.
+   · Tables turn into tap-friendly cards when THEIR container is narrow
+     (container queries — so it also works on tablets with the sidebar open)
+   · Bottom tab bar + swipe-able drawer on phones
+   · Modals become bottom sheets on phones
+   · Fluid spacing/type, safe-area aware, short-landscape aware
+   ═══════════════════════════════════════════════════════════════ */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{overflow-x:clip}
+#mainContent{min-width:0}
+img,svg,video{max-width:100%}
+.page-content{padding:clamp(12px,2.6vw,24px);max-width:1600px;margin-inline:auto;width:100%}
+#sidebar{height:100vh;height:100dvh;overflow-y:auto;overscroll-behavior:contain}
+.topbar{padding:clamp(8px,1.6vw,14px) clamp(12px,2.6vw,24px);padding-top:max(clamp(8px,1.6vw,14px),env(safe-area-inset-top))}
+.topbar-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.hdr-actions{display:flex;gap:8px;flex-wrap:wrap}
+.page-header{gap:10px}
+#rooms-grid{grid-template-columns:repeat(auto-fill,minmax(min(260px,100%),1fr))}
+.stat-grid{grid-template-columns:repeat(auto-fill,minmax(min(150px,45%),1fr))}
+.stat-value{overflow-wrap:anywhere}
+
+/* ── Tables: comfortable on wide containers ── */
+.table-wrap{container-type:inline-size;container-name:tw;overflow-x:auto}
+.rt{width:100%}
+.rt th,.rt td{overflow-wrap:anywhere;vertical-align:middle}
+@container tw (max-width:1100px){
+  .rt th{white-space:nowrap}
+  .rt th,.rt td{padding-left:8px;padding-right:8px}
+  .rt td.td-actions{min-width:0}
+}
+
+/* ── Tables → cards when the container is narrow ── */
+@container tw (max-width:880px){
+  .rt,.rt tbody{display:block;width:100%}
+  .rt thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .rt tbody{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:10px}
+  .rt tr{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;padding:12px 14px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);align-content:start}
+  .rt td{display:flex;flex-direction:column;gap:2px;padding:0!important;border:0!important;text-align:left!important;min-width:0}
+  .rt td::before{content:attr(data-label);font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--txt2);font-weight:600}
+  .rt td:first-child{grid-column:1/-1;font-size:1.05em;display:block;line-height:1.35}
+  .rt td:first-child::before{display:none}
+  .rt td[data-label="Email"]{grid-column:1/-1}
+  .rt.rt-roomfirst td[data-label="Room"]{order:-2;grid-column:1/-1;display:block;font-size:1.3em;font-weight:700}
+  .rt.rt-roomfirst td[data-label="Room"]::before{display:none}
+  .rt.rt-roomfirst td:first-child{order:-1;color:var(--txt2);font-size:.88em;margin-top:-6px}
+  .rt.rt-roomfirst td[data-actions]{order:99}
+  .rt td[data-actions]{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;gap:6px;padding-top:10px!important;border-top:1px dashed var(--border)!important}
+  .rt td[data-actions]::before{display:none}
+  .rt td[data-actions] .btn-xs,.rt td[data-actions] button,.rt td[data-actions] a{flex:1 1 auto;text-align:center;min-height:34px}
+  .rt td.rt-empty{grid-column:1/-1;display:block;text-align:center!important}
+  .rt td.rt-empty::before{display:none}
+  .rt tbody:has(.rt-empty){display:block}
+  .rt tr:has(.rt-empty){display:block;border:0;background:none}
+}
+@supports not (container-type:inline-size){
+  @media(max-width:1000px){
+    .rt,.rt tbody{display:block}.rt thead{display:none}
+    .rt tr{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;padding:12px;margin-bottom:10px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius)}
+    .rt td{display:flex;flex-direction:column;padding:0!important;border:0!important;text-align:left!important}
+    .rt td::before{content:attr(data-label);font-size:10px;text-transform:uppercase;color:var(--txt2)}
+    .rt td:first-child{grid-column:1/-1}.rt td:first-child::before{display:none}
+    .rt td[data-actions]{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;gap:6px}.rt td[data-actions]::before{display:none}
+  }
+}
+
+/* ── At-a-glance diagrams ── */
+.glance-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:16px;margin-bottom:22px}
+.gl-sub{color:var(--dim,var(--txt2));text-transform:none;letter-spacing:0;font-weight:400;margin-left:6px}
+.gl-key{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.gl-key-s{margin:12px 0 0}
+.gl-chip{display:inline-flex;align-items:center;gap:5px;font-size:calc(11.5px * var(--fs,1));padding:3px 9px;border-radius:99px;background:var(--bg2);border:1px solid var(--border);color:var(--txt2)}
+.gl-chip b{font-size:1.05em}
+.gl-paid{--gc:var(--green,#22c55e)}.gl-due{--gc:var(--amber,#f59e0b)}.gl-late{--gc:var(--red,#ef4444)}
+.gl-none{--gc:var(--accent,#6366f1)}.gl-vacant{--gc:#8b93a7}.gl-fix{--gc:#c2410c}
+.gl-chip b{color:var(--gc)}
+.gl-board{display:grid;grid-template-columns:repeat(auto-fill,minmax(clamp(68px,20vw,92px),1fr));gap:8px}
+.gl-tile{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;min-height:68px;padding:8px 4px;border-radius:10px;cursor:pointer;color:var(--txt);font:inherit;background:color-mix(in srgb,var(--gc) 14%,var(--card));border:1px solid color-mix(in srgb,var(--gc) 55%,transparent);border-left-width:4px;transition:transform .12s,box-shadow .12s;min-width:0}
+.gl-tile:hover,.gl-tile:focus-visible{transform:translateY(-2px);box-shadow:0 4px 14px rgba(0,0,0,.25);outline:none}
+.gl-tile b{font-size:calc(14px * var(--fs,1));max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gl-tile small{font-size:calc(10.5px * var(--fs,1));color:var(--txt2);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gl-tile em{font-style:normal;font-size:calc(10.5px * var(--fs,1));color:var(--gc);font-weight:700}
+.gl-sym{position:absolute;top:3px;right:6px;font-size:12px;color:var(--gc);font-weight:700}
+.gl-mx{max-width:760px;display:grid;grid-template-columns:minmax(40px,max-content) repeat(var(--cols,6),minmax(0,1fr));gap:4px;align-items:center}
+.gl-mh{text-align:center;font-size:calc(10.5px * var(--fs,1));color:var(--txt2);text-transform:uppercase;letter-spacing:.04em}
+.gl-mh.now{color:var(--accent);font-weight:700}
+.gl-mx-room{background:none;border:0;color:var(--txt);font:inherit;font-weight:600;font-size:calc(12.5px * var(--fs,1));text-align:left;cursor:pointer;padding:4px 6px 4px 0;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gl-mx-room:hover{color:var(--accent)}
+.gl-c{display:flex;align-items:center;justify-content:center;height:clamp(24px,5.5vw,30px);border-radius:6px;font-size:calc(13px * var(--fs,1));font-weight:700;color:var(--gc);background:color-mix(in srgb,var(--gc) 16%,transparent)}
+.gl-c.gl-none{background:transparent;color:var(--dim,var(--txt2));border:1px dashed var(--border)}
+.gl-more{margin-top:10px;width:100%;padding:8px;border-radius:var(--radius);border:1px dashed var(--border);background:none;color:var(--accent);cursor:pointer;font:inherit;font-size:calc(12.5px * var(--fs,1))}
+.gl-rd{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,118px),1fr));gap:8px}
+.gl-rd-tile{display:flex;flex-direction:column;gap:2px;text-align:left;padding:9px 11px;border-radius:10px;background:var(--bg2);border:1px solid var(--border);color:var(--txt);font:inherit;cursor:pointer;min-width:0}
+.gl-rd-tile:hover{border-color:var(--accent)}
+.gl-rd-tile b{font-size:calc(13.5px * var(--fs,1))}.gl-rd-tile span{font-size:calc(12.5px * var(--fs,1))}
+.gl-rd-tile .w{color:#42a5f5}.gl-rd-tile .p{color:#f5a524}.gl-rd-tile small{color:var(--txt2);font-size:calc(10.5px * var(--fs,1))}
+#reading-board,#bill-matrix{margin-bottom:16px}
+
+/* ── Mobile bottom tab bar + drawer backdrop ── */
+#mnav{display:none}
+#sb-backdrop{display:none}
+@media(max-width:768px){
+  #mnav{display:grid;grid-template-columns:repeat(5,1fr);position:fixed;left:0;right:0;bottom:0;z-index:90;background:var(--bg2);border-top:1px solid var(--border);padding:2px 4px env(safe-area-inset-bottom);box-shadow:0 -4px 18px rgba(0,0,0,.25)}
+  #mnav button{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;min-height:54px;background:none;border:0;color:var(--txt2);font:inherit;font-size:calc(10.5px * var(--fs,1));cursor:pointer;-webkit-tap-highlight-color:transparent}
+  #mnav button span{font-size:calc(20px * var(--fs,1));line-height:1}
+  #mnav button.active{color:var(--accent);font-weight:600}
+  #mnav button.active::before{content:'';position:absolute;top:0;left:28%;right:28%;height:3px;border-radius:0 0 3px 3px;background:var(--accent)}
+  .page-content{padding-bottom:calc(74px + env(safe-area-inset-bottom))}
+  #toast{left:12px;right:12px;bottom:calc(70px + env(safe-area-inset-bottom));max-width:none;text-align:center}
+  #sb-backdrop.show{display:block;position:fixed;inset:0;z-index:99;background:rgba(0,0,0,.55);backdrop-filter:blur(2px)}
+  #sidebar{width:min(300px,86vw)}
+  .topbar-clock{display:none}
+  .page-title{font-size:calc(18px * var(--fs,1))}
+  .page-header .btn-primary{flex:1 1 auto}
+  .hdr-actions{width:100%}.hdr-actions>*{flex:1 1 auto}
+  .filter-row select,.filter-row input{flex:1 1 140px;min-width:0}
+  .form-group input,.form-group select,.form-group textarea,.filter-row select,.filter-row input{font-size:max(16px,calc(14px * var(--fs,1)))}
+  .room-detail-header{gap:10px}
+  .stat-card{padding:12px}.stat-value{font-size:calc(22px * var(--fs,1))}
+  .stat-label{font-size:calc(10.5px * var(--fs,1))}
+  .dash-card{padding:14px}
+}
+/* ── Bottom-sheet modals on phones ── */
+@media(max-width:640px){
+  .modal-overlay{align-items:flex-end;padding:0}
+  .modal-box{width:100%;max-width:none!important;max-height:92vh;max-height:92dvh;border-radius:18px 18px 0 0;animation:rvSheet .24s ease-out;padding-bottom:env(safe-area-inset-bottom)}
+  .modal-box::before{content:'';display:block;width:42px;height:4px;border-radius:4px;background:var(--border);margin:8px auto 0;flex:none}
+  .modal-footer{position:sticky;bottom:0;background:var(--card,var(--bg2));flex-wrap:wrap}
+  .modal-footer button{flex:1 1 auto}
+  .modal-body{padding:16px}
+}
+@keyframes rvSheet{from{transform:translateY(40px);opacity:.4}to{transform:none;opacity:1}}
+/* ── Coarse pointers (touch): bigger targets ── */
+@media(pointer:coarse){
+  .btn-xs{min-height:34px;padding:6px 12px}
+  .btn-sm,.btn-secondary,.btn-primary{min-height:40px}
+  .nav-list a{padding-block:12px}
+}
+/* ── Tiny phones ── */
+@media(max-width:360px){
+  .stat-grid{grid-template-columns:1fr 1fr;gap:8px}
+  #mnav button{font-size:calc(9.5px * var(--fs,1))}
+  .gl-board{grid-template-columns:repeat(auto-fill,minmax(64px,1fr))}
+}
+/* ── Short landscape phones: shrink chrome, hide labels ── */
+@media(max-height:480px) and (orientation:landscape){
+  #mnav button{min-height:40px;flex-direction:row;gap:6px;justify-content:center}
+  #mnav button span{font-size:calc(17px * var(--fs,1))}
+  .page-content{padding-bottom:calc(52px + env(safe-area-inset-bottom))}
+  .hw{padding:12px 16px}
+}
+/* ── Big screens: use the room ── */
+@media(min-width:1500px){
+  .stat-grid{grid-template-columns:repeat(8,1fr)}
+}
+@media print{#mnav,#sb-backdrop{display:none!important}}

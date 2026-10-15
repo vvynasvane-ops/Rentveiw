@@ -19,6 +19,7 @@
   import { firebaseConfig } from "./firebase-config.js";
   import { initInsights, renderHome, usageTrends, esc } from "./insights.js";
   import { buildInvoicePdf, slipPageHtml, usageHistory, makeSlipNo } from "./slip.js";
+  import { initGlance, renderGlance } from "./glance.js";
   // ─────────────────────────────────────────────────────────────────────────
 
   const app  = initializeApp(firebaseConfig);
@@ -115,6 +116,10 @@
   try { const sp = localStorage.getItem('rr_ai_systemPrompt'); if (sp && /Rent ?Review/.test(sp)) localStorage.setItem('rr_ai_systemPrompt', sp.replace(/Rent ?Review/g, 'Rentveiw')); } catch(e) {}
 
   // Dashboard upgrades (welcome hero, health charts, search…) live in insights.js
+  initGlance({
+    data: () => ({ rooms, tenants, readings, bills, complaints }),
+    openRoom: (id) => navigate('room-detail', { roomId: id }),
+  });
   initInsights({
     data: () => ({ rooms, tenants, readings, bills, complaints }),
     user: () => ({ authUser: currentUser, building: buildingName, cc: countryCode }),
@@ -363,6 +368,7 @@
     else if (currentPage === 'room-detail' && activeRoomId) renderRoomDetail(activeRoomId);
     populateRoomSelect('tf-roomId'); populateRoomSelect('rdf-roomId');
     populateRoomSelect('bf-roomId'); populateRoomSelect('cf-roomId');
+    if (currentPage === 'billing' || currentPage === 'readings') renderGlance();
   }
 
   // ── Navigation ────────────────────────────────────────────────────────────
@@ -396,6 +402,7 @@
           break;
       }
     } catch(e) { showToast('Firebase error: '+e.message,'error'); console.error(e); }
+    if (page === 'billing' || page === 'readings') renderGlance();
     setLoading(page, false);
   }
   window.openRoom = function(id) { navigate('room-detail', { roomId: id }); };
@@ -423,6 +430,7 @@
     document.getElementById('stat-complaints').textContent = openComp;
     document.getElementById('stat-tenants').textContent    = tenants.length;
     renderHome();
+    renderGlance();
     const ul = document.getElementById('pending-list');
     const curMonth = new Date().getFullYear()+'-'+String(new Date().getMonth()+1).padStart(2,'0');
     if(pending.length===0){ ul.innerHTML='<li class="empty-item">✓ All bills settled</li>'; }
